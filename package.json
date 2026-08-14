@@ -1,0 +1,80 @@
+{
+  "name": "dsh-desktop",
+  "version": "0.1.0",
+  "description": "dsh-desktop — DeepSeek Harness Desktop Client",
+  "private": true,
+  "author": "Yuel25",
+  "license": "MIT",
+  "homepage": "https://github.com/Yuel25/dsh-desktop#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yuel25/dsh-desktop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Yuel25/dsh-desktop/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "electron",
+    "desktop"
+  ],
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "check": "pnpm run typecheck && pnpm run build",
+    "preview": "electron-vite preview",
+    "dist": "pnpm run build && electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "io.github.yuel25.dsh-desktop",
+    "productName": "dsh-desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.png",
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.0.5",
+    "electron": "43.4.0",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "sharp": "^0.35.3",
+    "typescript": "^6.0.0",
+    "vite": "8.2.1"
+  }
+}

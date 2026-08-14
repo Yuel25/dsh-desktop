@@ -1,0 +1,16 @@
+node_modules/
+out/
+release/
+coverage/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+electron.vite.config.js
+electron.vite.config.d.ts
+pnpm-debug.log*
