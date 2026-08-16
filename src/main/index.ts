@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createWriteStream, mkdirSync, readFileSync } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -11,58 +11,21 @@ const execFileAsync = promisify(execFile)
 const DSH_HOST = '127.0.0.1'
 const DSH_PORT = 3080
 const DSH_URL = `http://${DSH_HOST}:${DSH_PORT}`
+const WSL_PID_PREFIX = 'DSH_DESKTOP_PID='
+const WSL_START_COMMAND = [
+  'command -v dsh >/dev/null 2>&1 || {',
+  '  [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"',
+  '}',
+  'command -v dsh >/dev/null 2>&1 || { echo "dsh is not installed in WSL" >&2; exit 127; }',
+  `printf '${WSL_PID_PREFIX}%s\\n' "$$"`,
+  'exec dsh web',
+].join('\n')
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let dshProcess: ChildProcess | null = null
+let wslDshPid: number | null = null
 let quitting = false
-
-interface DesktopSettings {
-  dshSourceDirectory?: string
-}
-
-function settingsPath(): string {
-  return join(app.getPath('userData'), 'settings.json')
-}
-
-function readSettings(): DesktopSettings {
-  try {
-    return JSON.parse(readFileSync(settingsPath(), 'utf8')) as DesktopSettings
-  } catch {
-    return {}
-  }
-}
-
-function writeSettings(settings: DesktopSettings): void {
-  mkdirSync(app.getPath('userData'), { recursive: true })
-  writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, 'utf8')
-}
-
-async function resolveDshRepository(): Promise<string> {
-  if (process.env.DSH_SOURCE_DIR) return resolve(process.env.DSH_SOURCE_DIR)
-  if (!app.isPackaged) return resolve(app.getAppPath(), '..', 'deepseek-harness')
-
-  const configured = readSettings().dshSourceDirectory
-  if (configured && existsSync(join(configured, 'package.json'))) return configured
-
-  const options: Electron.OpenDialogOptions = {
-    title: '选择 DeepSeek Harness 源码目录',
-    message: '请选择包含 package.json 的 deepseek-harness 目录。',
-    properties: ['openDirectory'],
-  }
-  const selection = mainWindow
-    ? await dialog.showOpenDialog(mainWindow, options)
-    : await dialog.showOpenDialog(options)
-  if (selection.canceled || selection.filePaths.length === 0) {
-    throw new Error('尚未选择 DeepSeek Harness 源码目录。')
-  }
-  const repository = selection.filePaths[0]
-  if (!existsSync(join(repository, 'package.json'))) {
-    throw new Error(`所选目录不是有效的 DeepSeek Harness 源码目录：${repository}`)
-  }
-  writeSettings({ ...readSettings(), dshSourceDirectory: repository })
-  return repository
-}
 
 function canConnect(): Promise<boolean> {
   return new Promise((resolveConnection) => {
@@ -78,15 +41,15 @@ function canConnect(): Promise<boolean> {
   })
 }
 
-function resolveNodeExecutable(): string {
-  if (process.env.DSH_NODE_PATH) return process.env.DSH_NODE_PATH
-  if (process.platform === 'win32') {
-    const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files'
-    const candidate = join(programFiles, 'nodejs', 'node.exe')
-    if (existsSync(candidate)) return candidate
-    return 'node.exe'
-  }
-  return 'node'
+function wslArguments(command: string): string[] {
+  const distribution = process.env.DSH_WSL_DISTRO?.trim()
+  return [
+    ...(distribution ? ['--distribution', distribution] : []),
+    '--exec',
+    'bash',
+    '-lc',
+    command,
+  ]
 }
 
 function isDshReady(): Promise<boolean> {
@@ -130,26 +93,31 @@ async function startDsh(): Promise<'attached' | 'started'> {
     return 'attached'
   }
 
-  const repository = await resolveDshRepository()
-  if (!existsSync(join(repository, 'package.json'))) {
-    throw new Error(`找不到 DeepSeek Harness 源码目录：${repository}`)
-  }
-
-  sendStatus('正在启动 DeepSeek Harness…')
+  sendStatus('正在通过 WSL 启动 DeepSeek Harness…')
   const logDirectory = app.getPath('logs')
   mkdirSync(logDirectory, { recursive: true })
   const stdout = createWriteStream(join(logDirectory, 'dsh.stdout.log'), { flags: 'a' })
   const stderr = createWriteStream(join(logDirectory, 'dsh.stderr.log'), { flags: 'a' })
 
-  const cliEntry = join(repository, 'apps', 'cli', 'src', 'bin.ts')
-  dshProcess = spawn(resolveNodeExecutable(), ['--import', 'tsx/esm', cliEntry, 'web'], {
-    cwd: repository,
+  let pendingStdout = ''
+  wslDshPid = null
+  dshProcess = spawn('wsl.exe', wslArguments(WSL_START_COMMAND), {
     env: process.env,
     shell: false,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   dshProcess.stdout?.pipe(stdout)
+  dshProcess.stdout?.on('data', (chunk: Buffer) => {
+    pendingStdout += chunk.toString('utf8')
+    const lines = pendingStdout.split(/\r?\n/)
+    pendingStdout = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith(WSL_PID_PREFIX)) continue
+      const processId = Number.parseInt(line.slice(WSL_PID_PREFIX.length), 10)
+      if (Number.isSafeInteger(processId) && processId > 0) wslDshPid = processId
+    }
+  })
   dshProcess.stderr?.pipe(stderr)
   dshProcess.once('error', (error) => {
     stderr.write(`Failed to start DSH: ${error.stack ?? error.message}\n`)
@@ -158,6 +126,7 @@ async function startDsh(): Promise<'attached' | 'started'> {
     stdout.end()
     stderr.end()
     dshProcess = null
+    wslDshPid = null
   })
 
   await waitForDsh()
@@ -165,18 +134,26 @@ async function startDsh(): Promise<'attached' | 'started'> {
 }
 
 async function stopOwnedDsh(): Promise<void> {
-  const processId = dshProcess?.pid
-  if (!processId) return
+  const windowsProcessId = dshProcess?.pid
+  const linuxProcessId = wslDshPid
+  if (!windowsProcessId) return
   dshProcess = null
-  if (process.platform === 'win32') {
+  wslDshPid = null
+
+  if (linuxProcessId) {
     try {
-      await execFileAsync('taskkill.exe', ['/pid', String(processId), '/t', '/f'], { windowsHide: true })
+      await execFileAsync('wsl.exe', wslArguments(`kill -TERM ${linuxProcessId}`), { windowsHide: true })
+      return
     } catch {
-      // The process may already have exited.
+      // Fall through and terminate the Windows-side WSL client.
     }
-    return
   }
-  process.kill(processId, 'SIGTERM')
+
+  try {
+    await execFileAsync('taskkill.exe', ['/pid', String(windowsProcessId), '/t', '/f'], { windowsHide: true })
+  } catch {
+    // The process may already have exited.
+  }
 }
 
 function createWindow(): BrowserWindow {

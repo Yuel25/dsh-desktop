@@ -23,38 +23,38 @@
 - Provides a custom frameless title bar, system tray, and single-instance behavior
 - Keeps running in the tray and cleans up DSH processes owned by the app on exit
 - Attaches to an existing service on `127.0.0.1:3080`
-- Remembers the DSH source directory and supports launch at Windows login
+- Starts DSH in WSL and supports launch at Windows login
 - Captures DSH stdout and stderr logs
 - Produces a Windows NSIS installer
 
 ## Current status
 
-`0.1.0` is a phase-one preview. It currently requires:
+`0.1.1` is a phase-one preview. It currently requires:
 
 - Windows x64
-- Node.js `^22.19.0` or `>=24.0.0` (Node.js 24 recommended)
-- A dependency-installed and built [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) source checkout
+- WSL2 with an available Linux distribution
+- The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `dsh` command installed globally inside WSL
 
-Node.js and the DSH runtime are not bundled yet. On first launch, select the local `deepseek-harness` directory.
+The DSH runtime is not bundled; the app starts the existing DSH installation inside WSL.
 
 ## Quick start
 
-Prepare DeepSeek Harness:
+Prepare DeepSeek Harness in WSL:
 
-```powershell
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
-pnpm install
-pnpm run build
+```bash
+npm install -g @deepseek-ai/dsh
+dsh --version
 ```
 
-Download the Windows installer from [GitHub Releases](https://github.com/Yuel25/dsh-desktop/releases), install it, and select the checkout above on first launch.
+Download the Windows installer from [GitHub Releases](https://github.com/Yuel25/dsh-desktop/releases), install it, and launch it.
 
-If DSH is already listening on `127.0.0.1:3080`, the app attaches to it. Otherwise, it launches DSH with the system Node.js runtime:
+If DSH is already listening on `127.0.0.1:3080`, the app attaches to it. Otherwise, it launches DSH through WSL:
 
 ```text
-node --import tsx/esm apps/cli/src/bin.ts web
+wsl.exe --exec bash -lc "dsh web"
 ```
+
+The default WSL distribution is used unless `DSH_WSL_DISTRO` is set before launching the app.
 
 ## Development
 
@@ -76,7 +76,7 @@ Installer artifacts are written to `release/` and are not committed.
 
 ## Architecture
 
-The Electron main process owns the window, tray, and DSH child-process lifecycle. At startup it probes `127.0.0.1:3080`, attaches to an existing healthy service, or starts DSH from the configured source checkout. Once healthy, the window navigates from the local loading screen to the DSH Web UI.
+The Electron main process owns the window, tray, and DSH child-process lifecycle. At startup it probes `127.0.0.1:3080`, attaches to an existing healthy service, or starts `dsh web` through WSL. Once healthy, the window navigates from the local loading screen to the DSH Web UI.
 
 ## Security
 
@@ -89,8 +89,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 
 ## Roadmap
 
-- Bundle a controlled Node.js runtime
-- Package DSH build artifacts instead of requiring a source checkout
+- Add a WSL distribution picker and runtime diagnostics
 - Add a settings and runtime diagnostics UI
 - Add signed releases and automatic updates
 - Complete installer, upgrade, and uninstall testing
