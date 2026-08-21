@@ -1,10 +1,21 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  type MenuItemConstructorOptions,
+  nativeImage,
+  shell,
+  Tray,
+} from 'electron'
 
 const execFileAsync = promisify(execFile)
 const DSH_HOST = '127.0.0.1'
@@ -24,6 +35,8 @@ let recoveringDsh = false
 let rendererRecoveryAttempts = 0
 let rendererStableTimer: NodeJS.Timeout | null = null
 const MAX_RECOVERY_ATTEMPTS = 3
+const DEFAULT_PROFILE = 'web'
+let currentProfile = DEFAULT_PROFILE
 
 function canConnect(): Promise<boolean> {
   return new Promise((resolveConnection) => {
@@ -94,7 +107,58 @@ function setFrameColor(color: FrameColor): void {
   updateTrayMenu()
 }
 
+function profilesDirectory(): string {
+  return join(homedir(), '.dsh', 'profiles')
+}
+
+function listProfiles(): string[] {
+  try {
+    const root = profilesDirectory()
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, 'cordis.yml')))
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b))
+  } catch {
+    return []
+  }
+}
+
+function profileSettingsPath(): string {
+  return join(app.getPath('userData'), 'profile.json')
+}
+
+function loadProfile(): string {
+  try {
+    const settings = JSON.parse(readFileSync(profileSettingsPath(), 'utf8')) as { profile?: unknown }
+    if (typeof settings.profile === 'string' && settings.profile) return settings.profile
+  } catch {
+    // Missing or unreadable settings fall back to the default profile.
+  }
+  return DEFAULT_PROFILE
+}
+
+function setProfile(name: string): void {
+  if (name === currentProfile) return
+  currentProfile = name
+  writeFileSync(profileSettingsPath(), `${JSON.stringify({ profile: currentProfile }, null, 2)}\n`, 'utf8')
+  void restartApp()
+}
+
+function buildProfileMenu(): MenuItemConstructorOptions[] {
+  const profiles = listProfiles()
+  if (profiles.length === 0) {
+    return [{ label: `（未在 ${profilesDirectory()} 中找到 profile）`, enabled: false }]
+  }
+  return profiles.map((name) => ({
+    label: name,
+    type: 'radio' as const,
+    checked: name === currentProfile,
+    click: () => setProfile(name),
+  }))
+}
+
 function dshLaunch(): { command: string; args: string[] } {
+  const dshArgs = ['--profile', currentProfile, '--no-open']
   const powershellLauncher = process.env.APPDATA ? join(process.env.APPDATA, 'npm', 'dsh.ps1') : null
   if (powershellLauncher && existsSync(powershellLauncher)) {
     return {
@@ -107,12 +171,12 @@ function dshLaunch(): { command: string; args: string[] } {
         'Bypass',
         '-File',
         powershellLauncher,
-        'web',
-        '--no-open',
+        ...dshArgs,
       ],
     }
   }
-  return { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', 'dsh web --no-open'] }
+  const quoted = dshArgs.map((arg) => (arg.includes(' ') ? `"${arg}"` : arg))
+  return { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', `dsh ${quoted.join(' ')}`] }
 }
 
 async function startDsh(): Promise<'attached' | 'started'> {
@@ -315,6 +379,7 @@ function createTray(): void {
   tray.setToolTip('dsh-desktop')
   updateTrayMenu()
   tray.on('double-click', () => mainWindow?.show())
+  tray.on('right-click', () => updateTrayMenu())
 }
 
 function updateTrayMenu(): void {
@@ -328,6 +393,10 @@ function updateTrayMenu(): void {
         { label: '黑色', type: 'radio', checked: frameColor === 'black', click: () => setFrameColor('black') },
         { label: '白色', type: 'radio', checked: frameColor === 'white', click: () => setFrameColor('white') },
       ],
+    },
+    {
+      label: '切换 profile 目录',
+      submenu: buildProfileMenu(),
     },
     { type: 'separator' },
     {
@@ -350,6 +419,11 @@ function updateTrayMenu(): void {
 
 async function bootstrap(): Promise<void> {
   frameColor = loadFrameColor()
+  const availableProfiles = listProfiles()
+  currentProfile = loadProfile()
+  if (availableProfiles.length > 0 && !availableProfiles.includes(currentProfile)) {
+    currentProfile = DEFAULT_PROFILE
+  }
   mainWindow = createWindow()
   createTray()
   await showLocalLoadingScreen()
