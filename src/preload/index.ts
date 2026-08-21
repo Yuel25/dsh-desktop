@@ -2,6 +2,12 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 const TITLEBAR_ID = 'dsh-desktop-titlebar'
 
+type FrameColor = 'black' | 'white'
+
+function applyFrameColor(color: FrameColor): void {
+  document.getElementById(TITLEBAR_ID)?.setAttribute('data-color', color)
+}
+
 async function mountTitlebar(): Promise<void> {
   if (document.getElementById(TITLEBAR_ID)) return
 
@@ -34,6 +40,17 @@ async function mountTitlebar(): Promise<void> {
       -webkit-app-region: drag;
       user-select: none;
       font-family: Inter, "Segoe UI", system-ui, sans-serif;
+    }
+    #${TITLEBAR_ID}[data-color="black"] {
+      color: #dce8fa;
+      background: #171c2a;
+      border-bottom-color: rgba(255, 255, 255, 0.12);
+    }
+    #${TITLEBAR_ID}[data-color="white"] {
+      color: #182033;
+      background: #f7f8fb;
+      border-bottom-color: rgba(0, 0, 0, 0.18);
+      box-shadow: 0 1px 10px rgba(0, 0, 0, 0.12);
     }
     #${TITLEBAR_ID} .dsh-desktop-brand {
       min-width: 0;
@@ -79,6 +96,8 @@ async function mountTitlebar(): Promise<void> {
     }
     #${TITLEBAR_ID} button:hover { background: rgba(127, 151, 190, 0.16); }
     #${TITLEBAR_ID} button:active { background: rgba(127, 151, 190, 0.24); }
+    #${TITLEBAR_ID}[data-color="white"] button:hover { background: rgba(15, 23, 42, 0.09); }
+    #${TITLEBAR_ID}[data-color="white"] button:active { background: rgba(15, 23, 42, 0.16); }
     #${TITLEBAR_ID} .dsh-desktop-close:hover { color: #fff; background: #e5484d; }
     #${TITLEBAR_ID} svg { width: 11px; height: 11px; stroke: currentColor; stroke-width: 1.25; fill: none; }
   `
@@ -119,11 +138,13 @@ async function mountTitlebar(): Promise<void> {
 
   document.head.append(style)
   document.body.append(titlebar)
+  applyFrameColor(await ipcRenderer.invoke('appearance:get-frame-color') as FrameColor)
   const icon = titlebar.querySelector<HTMLImageElement>('.dsh-desktop-icon')
   if (icon) icon.src = await ipcRenderer.invoke('app:get-icon-data-url')
 }
 
 window.addEventListener('DOMContentLoaded', () => void mountTitlebar())
+ipcRenderer.on('appearance:frame-color', (_event, color: FrameColor) => applyFrameColor(color))
 
 contextBridge.exposeInMainWorld('dshDesktop', {
   onStatus: (listener: (message: string) => void) => {

@@ -21,25 +21,27 @@
 - 在无命令行窗口的情况下启动和管理 `dsh web`
 - 使用 Electron 窗口承载 DeepSeek Harness Web UI
 - 自定义无边框标题栏、系统托盘和单实例运行
+- 可从系统托盘安全重启桌面应用及其启动的 DSH 服务
+- 可从系统托盘选择黑色或白色标题栏，并自动保存选择
+- DSH 服务或界面意外崩溃时自动恢复，失败信息写入恢复日志
 - 关闭窗口后驻留托盘，退出时清理本应用启动的 DSH 进程
 - 检测已有的 `127.0.0.1:3080` 服务并直接连接
-- 通过 WSL 启动 Linux 环境中的 DSH，支持登录 Windows 后自动启动
+- 直接启动 Windows 环境中的 DSH，支持登录 Windows 后自动启动
 - 记录 DSH 标准输出和错误日志
 - 生成 Windows NSIS 安装包
 
 ## 当前状态
 
-`0.1.1` 是第一阶段预览版。目前应用仍然依赖：
+目前应用依赖：
 
 - Windows x64
-- WSL2 与一个可用的 Linux 发行版
-- 在 WSL 中全局安装的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `dsh` 命令
+- 在 Windows 中安装并加入 `PATH` 的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `dsh` 命令
 
-应用尚未内置 DSH 运行时，而是启动 WSL 中现有的 DSH 安装。
+应用尚未内置 DSH 运行时，而是启动 Windows 中现有的 DSH 安装。
 
 ## 快速开始
 
-### 1. 在 WSL 中准备 DeepSeek Harness
+### 1. 在 Windows 中准备 DeepSeek Harness
 
 ```bash
 npm install -g @deepseek-ai/dsh
@@ -52,13 +54,11 @@ dsh --version
 
 从 [GitHub Releases](https://github.com/Yuel25/dsh-desktop/releases) 下载 Windows 安装包，安装并启动。
 
-如果 DSH 已经监听 `127.0.0.1:3080`，应用会连接现有实例；否则应用会通过 WSL 启动：
+如果 DSH 已经监听 `127.0.0.1:3080`，应用会连接现有实例；否则应用会直接启动：
 
 ```text
-wsl.exe --exec bash -lc "dsh web"
+dsh web --no-open
 ```
-
-默认使用 WSL 默认发行版。如需指定发行版，可在启动应用前设置 `DSH_WSL_DISTRO` 环境变量。
 
 ## 本地开发
 
@@ -83,7 +83,7 @@ pnpm run dist       # 生成 Windows NSIS 安装包
 Electron 主进程负责窗口、托盘和 DSH 子进程生命周期。启动时会先检查 `127.0.0.1:3080`：
 
 1. 端口已存在且服务可用：连接现有 DSH，不取得该进程的所有权。
-2. 端口不可用：通过 WSL 启动 `dsh web`，并在应用退出时终止本应用启动的 Linux 进程。
+2. 端口不可用：在 Windows 中启动 `dsh web`，并在应用退出时终止本应用启动的进程。
 3. 后端就绪后：窗口从本地加载页切换到 DSH Web UI。
 
 日志保存在 Electron 的用户日志目录。可从托盘菜单选择“查看日志”。
@@ -99,7 +99,7 @@ Electron 主进程负责窗口、托盘和 DSH 子进程生命周期。启动时
 
 ## 路线图
 
-- WSL 发行版选择与运行时诊断界面
+- DSH 运行时诊断界面
 - 设置界面与运行时诊断
 - 自动更新和签名发布
 - 完善安装、升级、卸载测试

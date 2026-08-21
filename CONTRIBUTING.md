@@ -5,7 +5,7 @@ Thank you for helping improve dsh-desktop.
 ## Before opening an issue
 
 - Confirm the problem is in dsh-desktop rather than the DSH Web UI or a DSH plugin.
-- Check that DeepSeek Harness runs successfully with `pnpm dsh web` from its own repository.
+- Check that DeepSeek Harness runs successfully with `dsh web` on Windows.
 - Search existing issues before creating a duplicate.
 
 ## Development setup
