@@ -22,6 +22,7 @@ const ui = {
     openWindow: '新窗口',
     logs: '日志',
     refresh: '刷新',
+    openLogsFolder: '打开日志文件夹',
     emptyLog: '（暂无内容）',
     diagnostics: '诊断',
     copy: '复制诊断信息',
@@ -55,6 +56,7 @@ const ui = {
     openWindow: 'New window',
     logs: 'Logs',
     refresh: 'Refresh',
+    openLogsFolder: 'Open logs folder',
     emptyLog: '(empty)',
     diagnostics: 'Diagnostics',
     copy: 'Copy diagnostics',
@@ -257,6 +259,9 @@ function App(): React.JSX.Element {
           </select>
           <button className="btn" onClick={() => void readLog(logName)}>
             {text.refresh}
+          </button>
+          <button className="btn" onClick={() => void desktop.openLogsFolder()}>
+            {text.openLogsFolder}
           </button>
         </div>
         <pre className="output">{logText || text.emptyLog}</pre>

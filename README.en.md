@@ -20,14 +20,14 @@
 
 - Starts and manages `dsh web` without a console window
 - Hosts the DeepSeek Harness Web UI in an Electron window
-- Provides a custom frameless title bar, system tray, and single-instance behavior (the title bar shows the active profile)
+- Provides a custom frameless title bar, system tray, and single-instance behavior (the title bar shows the active profile), with a minimal tray menu
 - Safely restarts the desktop app and its owned DSH service from the system tray
-- Offers a persistent black or white title bar selectable from the system tray
-- Switches DSH profiles from the system tray (scans `~/.dsh/profiles`), restarting only the DSH service
+- Offers a persistent black or white title bar selectable in settings
+- Switches DSH profiles in settings (scans `~/.dsh/profiles`), restarting only the DSH service
 - Opens any profile in its own window so several profiles can run in parallel on separate ports
-- Built-in settings window: appearance, launch-at-login (optionally hidden), DSH port, and profile management
+- Built-in settings window: appearance and language, launch-at-login (optionally hidden), DSH port, and profile management
 - Built-in log viewer and one-click diagnostics copy (app version, dsh version, active profile, …)
-- Checks for updates at startup and links to the releases page from the tray
+- Checks for updates at startup; a download entry appears in the tray when a new version is available
 - Automatically recovers from DSH service and renderer crashes and reports the outcome through system notifications
 - Attaches to an existing service on `127.0.0.1:3080`, identifying its profile first and prompting on mismatch
 - Shows an install guide with a retry button when the dsh command is missing
@@ -64,22 +64,22 @@ dsh --profile web --no-open
 
 ## Switching profiles
 
-The tray menu lists every directory under `~/.dsh/profiles` that contains a `cordis.yml`. After selecting one:
+The Profile section of the settings window lists every directory under `~/.dsh/profiles` that contains a `cordis.yml`. After selecting one:
 
 - Only the DSH process owned by the app is restarted; the desktop app keeps running.
 - The choice is saved to `settings.json` in the user data directory and reused on the next launch.
 - If the port is held by an externally started DSH, the app cannot switch its profile and keeps the previous selection after showing a warning.
 
-"Open profile in new window" starts a dedicated DSH instance for that profile (on an automatically assigned free port) in its own window; closing that window stops the instance. Their logs are written to `dsh.<profile>.stdout.log` / `dsh.<profile>.stderr.log`.
+The "New window" button next to each non-active profile starts a dedicated DSH instance for it (on an automatically assigned free port) in its own window; closing that window stops the instance. Their logs are written to `dsh.<profile>.stdout.log` / `dsh.<profile>.stderr.log`.
 
 ## Settings and diagnostics
 
-The tray menu's "Settings…" opens the settings window:
+The tray menu keeps only high-frequency actions (open, open in browser, settings, restart, quit); everything else lives in the settings window:
 
-- **Appearance**: black or white title bar, applied immediately.
+- **Appearance**: black or white title bar and the UI language, applied immediately.
 - **Startup**: launch at login (optionally hidden to the tray with DSH starting in the background) and the DSH port (applies after an app restart).
 - **Profile**: switch the main window's profile or open other profiles in new windows.
-- **Logs**: built-in viewer for dsh output, errors, the recovery log, and per-profile-window logs.
+- **Logs**: built-in viewer for dsh output, errors, the recovery log, and per-profile-window logs, plus a shortcut to the logs folder.
 - **Diagnostics**: one-click copy of the app version, dsh version, active profile, and more for issue reports.
 - **Update**: manual update check with a link to the releases page. An automatic check also runs at startup and notifies you when a new version is available.
 

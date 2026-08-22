@@ -96,17 +96,6 @@ const messages = {  trayOpen: { zh: '打开 dsh-desktop', en: 'Open dsh-desktop'
   trayOpenBrowser: { zh: '在浏览器中打开', en: 'Open in browser' },
   traySettings: { zh: '设置…', en: 'Settings…' },
   trayRestart: { zh: '重启 dsh-desktop', en: 'Restart dsh-desktop' },
-  trayFrameColor: { zh: '标题栏颜色', en: 'Title bar color' },
-  frameBlack: { zh: '黑色', en: 'Black' },
-  frameWhite: { zh: '白色', en: 'White' },
-  trayProfiles: { zh: '切换 profile 目录', en: 'Switch profile directory' },
-  trayExtraProfiles: { zh: '在新窗口打开 profile', en: 'Open profile in new window' },
-  trayExtraProfilesHint: { zh: '（已在主窗口运行）', en: '(already in the main window)' },
-  trayNoProfilesDir: { zh: '未找到目录 {0}', en: 'Directory not found: {0}' },
-  trayNoProfiles: { zh: '{0} 中没有包含 cordis.yml 的 profile', en: 'No profile with cordis.yml under {0}' },
-  trayAutoStart: { zh: '开机自启动', en: 'Launch at login' },
-  trayViewLogs: { zh: '查看日志', en: 'View logs' },
-  trayCheckUpdate: { zh: '检查更新', en: 'Check for updates' },
   trayDownloadUpdate: { zh: '下载新版本 v{0}', en: 'Download v{0}' },
   trayQuit: { zh: '退出', en: 'Quit' },
   statusConnectingExisting: { zh: '检测到已运行的 DSH（profile：{0}），正在连接…', en: 'Found a running DSH (profile: {0}), connecting…' },
@@ -174,9 +163,6 @@ const messages = {  trayOpen: { zh: '打开 dsh-desktop', en: 'Open dsh-desktop'
   notifyUpdateBody: { zh: 'v{0} 已发布，可从托盘菜单下载。', en: 'v{0} is available from the tray menu.' },
   notifyRecoveredTitle: { zh: 'DSH 已自动恢复', en: 'DSH recovered automatically' },
   notifyRecoverFailedTitle: { zh: 'DSH 自动恢复失败', en: 'DSH auto-recovery failed' },
-  notifyUpdateNone: { zh: '当前已是最新版本（v{0}）。', en: 'You are on the latest version (v{0}).' },
-  notifyUpdateFound: { zh: '新版本 v{0} 可用，正在打开下载页面…', en: 'v{0} is available; opening the download page…' },
-  notifyUpdateError: { zh: '检查更新失败：{0}', en: 'Update check failed: {0}' },
 } satisfies Record<string, { zh: string; en: string }>
 
 type MessageKey = keyof typeof messages
@@ -784,7 +770,7 @@ function compareVersions(a: string, b: string): number {
   return 0
 }
 
-async function checkForUpdates(trigger: 'auto' | 'tray' | 'settings'): Promise<UpdateResult> {
+async function checkForUpdates(trigger: 'auto' | 'settings'): Promise<UpdateResult> {
   const current = app.getVersion()
   const result: UpdateResult = { current, latest: null, newer: false, releaseUrl: null, error: null }
   try {
@@ -805,13 +791,7 @@ async function checkForUpdates(trigger: 'auto' | 'tray' | 'settings'): Promise<U
     updateTrayMenu()
     if (trigger === 'auto') {
       notify(t('notifyUpdateTitle'), t('notifyUpdateBody', result.latest))
-    } else if (trigger === 'tray') {
-      notify(t('notifyUpdateTitle'), t('notifyUpdateFound', result.latest))
-      void shell.openExternal(result.releaseUrl ?? 'https://github.com/Yuel25/dsh-desktop/releases')
     }
-  } else if (trigger === 'tray') {
-    if (result.error) notify(t('notifyUpdateTitle'), t('notifyUpdateError', result.error))
-    else notify(t('notifyUpdateTitle'), t('notifyUpdateNone', current))
   }
   return result
 }
@@ -962,74 +942,31 @@ function createTray(): void {
   tray.on('right-click', () => updateTrayMenu())
 }
 
-function buildProfileMenu(): MenuItemConstructorOptions[] {
-  const root = profilesDirectory()
-  if (!existsSync(root)) {
-    return [{ label: t('trayNoProfilesDir', root), enabled: false }]
-  }
-  const profiles = listProfiles()
-  if (profiles.length === 0) {
-    return [{ label: t('trayNoProfiles', root), enabled: false }]
-  }
-  return profiles.map((name) => ({
-    label: name,
-    type: 'radio' as const,
-    checked: name === settings.profile,
-    click: () => void switchProfile(name),
-  }))
-}
-
-function buildExtraProfileMenu(): MenuItemConstructorOptions[] {
-  const profiles = listProfiles()
-  if (profiles.length === 0) {
-    return [{ label: t('trayNoProfiles', profilesDirectory()), enabled: false }]
-  }
-  return profiles.map((name) => {
-    if (name === settings.profile && dshReady) {
-      return { label: `${name} ${t('trayExtraProfilesHint')}`, enabled: false }
-    }
-    return { label: name, click: () => void openProfileWindow(name) }
-  })
-}
-
 function updateTrayMenu(): void {
+  // High-frequency actions only; everything else lives in the settings window.
   const template: MenuItemConstructorOptions[] = [
     { label: t('trayOpen'), click: () => mainWindow?.show() },
     { label: t('trayOpenBrowser'), click: () => void shell.openExternal(primaryDshUrl()) },
     { label: t('traySettings'), click: () => openSettingsWindow() },
-    { label: t('trayRestart'), click: () => void restartApp() },
-    {
-      label: t('trayFrameColor'),
-      submenu: [
-        { label: t('frameBlack'), type: 'radio', checked: settings.frameColor === 'black', click: () => setFrameColor('black') },
-        { label: t('frameWhite'), type: 'radio', checked: settings.frameColor === 'white', click: () => setFrameColor('white') },
-      ],
-    },
-    { label: t('trayProfiles'), submenu: buildProfileMenu() },
-    { label: t('trayExtraProfiles'), submenu: buildExtraProfileMenu() },
-    { type: 'separator' },
-    {
-      label: t('trayAutoStart'),
-      type: 'checkbox',
-      checked: app.getLoginItemSettings().openAtLogin,
-      click: (item) => applyLoginItems(item.checked),
-    },
-    { label: t('trayViewLogs'), click: () => void shell.openPath(app.getPath('logs')) },
-    { label: t('trayCheckUpdate'), click: () => void checkForUpdates('tray') },
   ]
   if (latestAvailableVersion) {
-    template.splice(3, 0, {
+    template.push({
       label: t('trayDownloadUpdate', latestAvailableVersion),
       click: () => void shell.openExternal('https://github.com/Yuel25/dsh-desktop/releases/latest'),
     })
   }
-  tray?.setContextMenu(Menu.buildFromTemplate([...template, { type: 'separator' }, {
-    label: t('trayQuit'),
-    click: () => {
-      quitting = true
-      app.quit()
+  template.push(
+    { label: t('trayRestart'), click: () => void restartApp() },
+    { type: 'separator' },
+    {
+      label: t('trayQuit'),
+      click: () => {
+        quitting = true
+        app.quit()
+      },
     },
-  }]))
+  )
+  tray?.setContextMenu(Menu.buildFromTemplate(template))
 }
 
 function setFrameColor(color: FrameColor): void {
