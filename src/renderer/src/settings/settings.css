@@ -13,7 +13,9 @@ body {
 }
 
 .settings {
-  min-height: calc(100vh - 38px);
+  /* Fixed height so the page scrolls inside the window; the titlebar styles
+     clip body overflow, which would otherwise cut off lower sections. */
+  height: calc(100vh - 38px);
   padding: 20px 26px 32px;
   background:
     radial-gradient(circle at 20% 0%, rgba(37, 99, 235, 0.22), transparent 42%),
