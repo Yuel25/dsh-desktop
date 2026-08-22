@@ -138,6 +138,15 @@ async function mountTitlebar(): Promise<void> {
 
   document.head.append(style)
   document.body.append(titlebar)
+
+  // The host page is a full SPA and may re-render <body>; keep the titlebar
+  // and its styles attached.
+  const reattach = (): void => {
+    if (!style.isConnected) document.head.append(style)
+    if (document.body && !titlebar.isConnected) document.body.append(titlebar)
+  }
+  new MutationObserver(reattach).observe(document.documentElement, { childList: true, subtree: true })
+
   applyFrameColor(await ipcRenderer.invoke('appearance:get-frame-color') as FrameColor)
   const icon = titlebar.querySelector<HTMLImageElement>('.dsh-desktop-icon')
   if (icon) icon.src = await ipcRenderer.invoke('app:get-icon-data-url')
@@ -146,12 +155,22 @@ async function mountTitlebar(): Promise<void> {
 window.addEventListener('DOMContentLoaded', () => void mountTitlebar())
 ipcRenderer.on('appearance:frame-color', (_event, color: FrameColor) => applyFrameColor(color))
 
-contextBridge.exposeInMainWorld('dshDesktop', {
-  onStatus: (listener: (message: string) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, message: string): void => listener(message)
-    ipcRenderer.on('dsh:status', handler)
-    return () => ipcRenderer.removeListener('dsh:status', handler)
-  },
-  getOpenAtLogin: (): Promise<boolean> => ipcRenderer.invoke('app:get-login-settings'),
-  setOpenAtLogin: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke('app:set-login-settings', enabled),
-})
+// The DSH web page only needs the titlebar; the status/login bridge is for
+// dsh-desktop's own loading page, so keep it away from hosted app code.
+const localRendererOrigin = process.env.ELECTRON_RENDERER_URL
+  ? new URL(process.env.ELECTRON_RENDERER_URL).origin
+  : null
+const isLocalRenderer = location.protocol === 'file:' ||
+  (localRendererOrigin !== null && location.origin === localRendererOrigin)
+
+if (isLocalRenderer) {
+  contextBridge.exposeInMainWorld('dshDesktop', {
+    onStatus: (listener: (message: string) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, message: string): void => listener(message)
+      ipcRenderer.on('dsh:status', handler)
+      return () => ipcRenderer.removeListener('dsh:status', handler)
+    },
+    getOpenAtLogin: (): Promise<boolean> => ipcRenderer.invoke('app:get-login-settings'),
+    setOpenAtLogin: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke('app:set-login-settings', enabled),
+  })
+}

@@ -15,6 +15,7 @@ import {
   nativeImage,
   shell,
   Tray,
+  type WebContents,
 } from 'electron'
 
 const execFileAsync = promisify(execFile)
@@ -32,6 +33,7 @@ let restarting = false
 let frameColor: FrameColor = 'black'
 let dshReady = false
 let recoveringDsh = false
+let switchingProfile = false
 let rendererRecoveryAttempts = 0
 let rendererStableTimer: NodeJS.Timeout | null = null
 const MAX_RECOVERY_ATTEMPTS = 3
@@ -137,24 +139,140 @@ function loadProfile(): string {
   return DEFAULT_PROFILE
 }
 
-function setProfile(name: string): void {
-  if (name === currentProfile) return
+function saveProfile(name: string): void {
   currentProfile = name
   writeFileSync(profileSettingsPath(), `${JSON.stringify({ profile: currentProfile }, null, 2)}\n`, 'utf8')
-  void restartApp()
+}
+
+async function listeningPid(port: number): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('netstat.exe', ['-ano', '-p', 'tcp'], { timeout: 5_000, windowsHide: true })
+    for (const line of stdout.split('\n')) {
+      const match = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/)
+      if (match && Number(match[1]) === port) return Number(match[2])
+    }
+  } catch {
+    // netstat unavailable; the caller treats this as "unknown".
+  }
+  return null
+}
+
+async function processCommandLine(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+      { timeout: 5_000, windowsHide: true },
+    )
+    return stdout.trim() || null
+  } catch {
+    return null
+  }
+}
+
+function profileFromCommandLine(commandLine: string): string | null {
+  if (!/\bdsh(\.cmd|\.ps1|\.exe)?\b/i.test(commandLine)) return null
+  const flagged = commandLine.match(/--profile[= ]"?([^\s"]+)"?/i)
+  return flagged ? flagged[1] : DEFAULT_PROFILE
+}
+
+async function runningDshProfile(): Promise<string | null> {
+  const pid = await listeningPid(DSH_PORT)
+  if (!pid) return null
+  const commandLine = await processCommandLine(pid)
+  if (!commandLine) return null
+  return profileFromCommandLine(commandLine)
+}
+
+async function switchProfile(name: string): Promise<void> {
+  if (name === currentProfile || quitting || recoveringDsh || switchingProfile) return
+  switchingProfile = true
+  const previousProfile = currentProfile
+  saveProfile(name)
+  updateTrayMenu()
+
+  try {
+    sendStatus(`正在切换到 profile「${name}」…`)
+    await showLocalLoadingScreen()
+    await stopOwnedDsh()
+
+    if (await canConnect()) {
+      saveProfile(previousProfile)
+      updateTrayMenu()
+      sendStatus(`端口 ${DSH_PORT} 被外部启动的 DSH 占用，无法切换 profile。`)
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: '无法切换 profile',
+          message: `端口 ${DSH_PORT} 上的 DSH 由外部启动，dsh-desktop 无法替它切换 profile。`,
+          detail: `已切回 profile「${previousProfile}」。请关闭外部 DSH 后再试。`,
+        })
+        await mainWindow.loadURL(DSH_URL)
+      }
+      return
+    }
+
+    try {
+      await startDsh()
+      dshReady = true
+      sendStatus(`profile「${name}」已就绪，正在打开界面…`)
+      if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(DSH_URL)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      writeRecoveryLog(`Switch to profile "${name}" failed: ${message}`)
+      saveProfile(previousProfile)
+      updateTrayMenu()
+
+      let restored = false
+      try {
+        sendStatus(`切换失败，正在恢复 profile「${previousProfile}」…`)
+        await startDsh()
+        dshReady = true
+        restored = true
+      } catch (restoreError) {
+        const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError)
+        writeRecoveryLog(`Restoring profile "${previousProfile}" failed: ${restoreMessage}`)
+        sendStatus(`恢复 profile 失败：${restoreMessage}`)
+      }
+      if (restored && mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(DSH_URL)
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'error',
+          title: '切换 profile 失败',
+          message: `无法启动 profile「${name}」：${message}`,
+          detail: restored
+            ? `已恢复原 profile「${previousProfile}」。`
+            : `恢复原 profile 也失败了。请检查日志：${app.getPath('logs')}`,
+        })
+      }
+    }
+  } finally {
+    switchingProfile = false
+    updateTrayMenu()
+  }
 }
 
 function buildProfileMenu(): MenuItemConstructorOptions[] {
+  const root = profilesDirectory()
+  if (!existsSync(root)) {
+    return [{ label: `（未找到目录 ${root}）`, enabled: false }]
+  }
   const profiles = listProfiles()
   if (profiles.length === 0) {
-    return [{ label: `（未在 ${profilesDirectory()} 中找到 profile）`, enabled: false }]
+    return [{ label: `（${root} 中没有包含 cordis.yml 的 profile）`, enabled: false }]
   }
   return profiles.map((name) => ({
     label: name,
     type: 'radio' as const,
     checked: name === currentProfile,
-    click: () => setProfile(name),
+    click: () => void switchProfile(name),
   }))
+}
+
+function quoteCmdArgument(argument: string): string {
+  if (!/[\s"]/.test(argument)) return argument
+  return `"${argument.replace(/"/g, '""')}"`
 }
 
 function dshLaunch(): { command: string; args: string[] } {
@@ -175,13 +293,32 @@ function dshLaunch(): { command: string; args: string[] } {
       ],
     }
   }
-  const quoted = dshArgs.map((arg) => (arg.includes(' ') ? `"${arg}"` : arg))
+  const quoted = dshArgs.map(quoteCmdArgument)
   return { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', `dsh ${quoted.join(' ')}`] }
 }
 
 async function startDsh(): Promise<'attached' | 'started'> {
   if (await canConnect()) {
-    sendStatus('检测到已运行的 DSH，正在连接…')
+    const runningProfile = await runningDshProfile()
+    if (runningProfile && runningProfile !== currentProfile && mainWindow && !mainWindow.isDestroyed()) {
+      const choice = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'profile 不一致',
+        message: `端口 ${DSH_PORT} 上已运行的 DSH 使用 profile「${runningProfile}」，与当前选择的「${currentProfile}」不一致。`,
+        detail: '该 DSH 不是 dsh-desktop 启动的，无法替它切换 profile。可以连接现有实例，或关闭它后重试。',
+        buttons: ['连接现有实例', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      if (choice.response === 1) {
+        throw new Error(`已取消连接使用 profile「${runningProfile}」的现有 DSH。`)
+      }
+    }
+    sendStatus(
+      runningProfile
+        ? `检测到已运行的 DSH（profile：${runningProfile}），正在连接…`
+        : '检测到已运行的 DSH（无法确认其 profile），正在连接…',
+    )
     await waitForDsh(15_000)
     return 'attached'
   }
@@ -274,6 +411,9 @@ function writeRecoveryLog(message: string): void {
 }
 
 async function stopOwnedDsh(): Promise<void> {
+  // Clearing dshReady first keeps the exit handler from treating our own
+  // shutdown as a crash and racing recovery against the caller.
+  dshReady = false
   const windowsProcessId = dshProcess?.pid
   if (!windowsProcessId) return
   dshProcess = null
@@ -456,8 +596,18 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => void bootstrap())
 }
 
-ipcMain.handle('app:get-login-settings', () => app.getLoginItemSettings().openAtLogin)
-ipcMain.handle('app:set-login-settings', (_event, enabled: boolean) => {
+function isTrustedRenderer(sender: WebContents): boolean {
+  const url = sender.getURL()
+  if (process.env.ELECTRON_RENDERER_URL) return url.startsWith(process.env.ELECTRON_RENDERER_URL)
+  return url.startsWith('file:')
+}
+
+ipcMain.handle('app:get-login-settings', (event) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error('This API is only available to the local loading page.')
+  return app.getLoginItemSettings().openAtLogin
+})
+ipcMain.handle('app:set-login-settings', (event, enabled: boolean) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error('This API is only available to the local loading page.')
   app.setLoginItemSettings({ openAtLogin: enabled })
   return app.getLoginItemSettings().openAtLogin
 })
