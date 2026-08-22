@@ -1,0 +1,153 @@
+:root {
+  color: #e5eefc;
+  background: #07101f;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.settings {
+  min-height: calc(100vh - 38px);
+  padding: 20px 26px 32px;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(37, 99, 235, 0.22), transparent 42%),
+    #07101f;
+  overflow-y: auto;
+}
+
+.settings section {
+  margin-bottom: 22px;
+  padding: 16px 20px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.settings h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: #cfe0f7;
+}
+
+.settings label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  color: #b9c8de;
+  font-size: 14px;
+}
+
+.settings label.inline {
+  display: inline-flex;
+}
+
+.settings .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 0;
+  flex-wrap: wrap;
+}
+
+.settings .hint {
+  margin: 6px 0 0;
+  color: #6f8bad;
+  font-size: 12.5px;
+}
+
+.settings .tag {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  border-radius: 999px;
+  color: #8fd0ff;
+  font-size: 11px;
+}
+
+.settings .profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings .profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings select,
+.settings .port {
+  padding: 6px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  background: rgba(8, 15, 30, 0.85);
+  color: #dbe7fa;
+  font: inherit;
+  font-size: 13.5px;
+}
+
+.settings .port {
+  width: 96px;
+}
+
+.settings .btn {
+  padding: 6px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  background: rgba(30, 41, 59, 0.7);
+  color: #dbe7fa;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings .btn:hover {
+  border-color: rgba(96, 165, 250, 0.6);
+  background: rgba(37, 99, 235, 0.25);
+}
+
+.settings .btn.small {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.settings .output {
+  max-height: 180px;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  background: rgba(8, 15, 30, 0.85);
+  color: #9fb6d6;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.loader {
+  width: 28px;
+  height: 28px;
+  margin: 40px auto;
+  border: 3px solid rgba(147, 197, 253, 0.22);
+  border-top-color: #60a5fa;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

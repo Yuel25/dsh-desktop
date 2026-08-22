@@ -1,5 +1,16 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  createWriteStream,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
 import { homedir } from 'node:os'
@@ -13,6 +24,8 @@ import {
   Menu,
   type MenuItemConstructorOptions,
   nativeImage,
+  net as electronNet,
+  Notification,
   shell,
   Tray,
   type WebContents,
@@ -20,29 +33,212 @@ import {
 
 const execFileAsync = promisify(execFile)
 const DSH_HOST = '127.0.0.1'
-const DSH_PORT = 3080
-const DSH_URL = `http://${DSH_HOST}:${DSH_PORT}`
+const DEFAULT_DSH_PORT = 3080
+const DEFAULT_PROFILE = 'web'
+const MAX_RECOVERY_ATTEMPTS = 3
+const UPDATE_FEED_URL = 'https://api.github.com/repos/Yuel25/dsh-desktop/releases/latest'
+const DSH_DOCS_URL = 'https://github.com/deepseek-ai/deepseek-harness'
+
 type FrameColor = 'black' | 'white'
+type Locale = 'zh' | 'en'
+type AppSettings = { frameColor: FrameColor; profile: string; port: number; startHidden: boolean }
+type GuidanceMode = 'dsh-missing' | 'start-failed'
+type Guidance = { mode: GuidanceMode; message: string } | null
+type UpdateResult = {
+  current: string
+  latest: string | null
+  newer: boolean
+  releaseUrl: string | null
+  error: string | null
+}
 
 let mainWindow: BrowserWindow | null = null
+let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let dshProcess: ChildProcess | null = null
 let dshStartupError: Error | null = null
 let quitting = false
 let restarting = false
-let frameColor: FrameColor = 'black'
 let dshReady = false
 let recoveringDsh = false
 let switchingProfile = false
+let startingPrimary = false
 let rendererRecoveryAttempts = 0
 let rendererStableTimer: NodeJS.Timeout | null = null
-const MAX_RECOVERY_ATTEMPTS = 3
-const DEFAULT_PROFILE = 'web'
-let currentProfile = DEFAULT_PROFILE
+let latestAvailableVersion: string | null = null
+let cachedDshVersion: string | null = null
+let settings: AppSettings = { frameColor: 'black', profile: DEFAULT_PROFILE, port: DEFAULT_DSH_PORT, startHidden: false }
 
-function canConnect(): Promise<boolean> {
+type ExtraDshWindow = {
+  profile: string
+  port: number
+  url: string
+  process: ChildProcess | null
+  window: BrowserWindow
+  recoveryAttempts: number
+}
+const extraDshWindows: ExtraDshWindow[] = []
+
+const locale: Locale = app.getLocale().toLowerCase().startsWith('zh') ? 'zh' : 'en'
+const launchHidden = process.argv.includes('--hidden') || process.argv.includes('/hidden')
+
+// ---------------------------------------------------------------------------
+// Localization
+// ---------------------------------------------------------------------------
+
+const messages = {  trayOpen: { zh: '打开 dsh-desktop', en: 'Open dsh-desktop' },
+  trayOpenBrowser: { zh: '在浏览器中打开', en: 'Open in browser' },
+  traySettings: { zh: '设置…', en: 'Settings…' },
+  trayRestart: { zh: '重启 dsh-desktop', en: 'Restart dsh-desktop' },
+  trayFrameColor: { zh: '标题栏颜色', en: 'Title bar color' },
+  frameBlack: { zh: '黑色', en: 'Black' },
+  frameWhite: { zh: '白色', en: 'White' },
+  trayProfiles: { zh: '切换 profile 目录', en: 'Switch profile directory' },
+  trayExtraProfiles: { zh: '在新窗口打开 profile', en: 'Open profile in new window' },
+  trayExtraProfilesHint: { zh: '（已在主窗口运行）', en: '(already in the main window)' },
+  trayNoProfilesDir: { zh: '未找到目录 {0}', en: 'Directory not found: {0}' },
+  trayNoProfiles: { zh: '{0} 中没有包含 cordis.yml 的 profile', en: 'No profile with cordis.yml under {0}' },
+  trayAutoStart: { zh: '开机自启动', en: 'Launch at login' },
+  trayViewLogs: { zh: '查看日志', en: 'View logs' },
+  trayCheckUpdate: { zh: '检查更新', en: 'Check for updates' },
+  trayDownloadUpdate: { zh: '下载新版本 v{0}', en: 'Download v{0}' },
+  trayQuit: { zh: '退出', en: 'Quit' },
+  statusConnectingExisting: { zh: '检测到已运行的 DSH（profile：{0}），正在连接…', en: 'Found a running DSH (profile: {0}), connecting…' },
+  statusConnectingUnknown: { zh: '检测到已运行的 DSH（无法确认其 profile），正在连接…', en: 'Found a running DSH (profile unknown), connecting…' },
+  statusStarting: { zh: '正在启动 DeepSeek Harness…', en: 'Starting DeepSeek Harness…' },
+  statusStartingProfile: { zh: '正在启动 profile「{0}」…', en: 'Starting profile "{0}"…' },
+  statusRecovering: { zh: 'DSH 意外退出，正在自动恢复（{0}/{1}）…', en: 'DSH exited unexpectedly; recovering ({0}/{1})…' },
+  statusReady: { zh: 'DSH 已就绪，正在打开界面…', en: 'DSH is ready, opening the UI…' },
+  statusReadyProfile: { zh: 'profile「{0}」已就绪，正在打开界面…', en: 'Profile "{0}" is ready, opening the UI…' },
+  statusSwitching: { zh: '正在切换到 profile「{0}」…', en: 'Switching to profile "{0}"…' },
+  statusSwitchFailedRestore: { zh: '切换失败，正在恢复 profile「{0}」…', en: 'Switch failed, restoring profile "{0}"…' },
+  statusSwitchFailedRestoreFail: { zh: '恢复 profile 失败：{0}', en: 'Failed to restore the profile: {0}' },
+  statusPortBusy: { zh: '端口 {0} 被外部启动的 DSH 占用，无法切换 profile。', en: 'Port {0} is held by an externally started DSH; cannot switch profiles.' },
+  statusDshMissing: { zh: '未检测到 dsh 命令，请先安装 DeepSeek Harness。', en: 'The dsh command was not found; install DeepSeek Harness first.' },
+  errorUntrusted: { zh: '该 API 仅对本地页面开放。', en: 'This API is only available to local pages.' },
+  errorExitedEarly: { zh: 'DSH 在就绪前退出（退出码 {0}）。', en: 'DSH exited before becoming ready (code {0}).' },
+  errorNotReadyTimeout: { zh: 'DSH 在 {0} 秒内未就绪。', en: 'DSH did not become ready within {0} seconds.' },
+  errorAttachCancelled: { zh: '已取消连接使用 profile「{0}」的现有 DSH。', en: 'Cancelled connecting to the existing DSH with profile "{0}".' },
+  errorExternalHttp: { zh: '仅允许打开 https 链接。', en: 'Only https URLs can be opened.' },
+  dialogProfileMismatchTitle: { zh: 'profile 不一致', en: 'Profile mismatch' },
+  dialogProfileMismatchMessage: {
+    zh: '端口 {0} 上已运行的 DSH 使用 profile「{1}」，与当前选择的「{2}」不一致。',
+    en: 'The DSH on port {0} runs profile "{1}", which differs from the selected "{2}".',
+  },
+  dialogProfileMismatchDetail: {
+    zh: '该 DSH 不是 dsh-desktop 启动的，无法替它切换 profile。可以连接现有实例，或关闭它后重试。',
+    en: 'This DSH was not started by dsh-desktop, so its profile cannot be switched. Attach to it, or close it and retry.',
+  },
+  dialogAttach: { zh: '连接现有实例', en: 'Attach' },
+  dialogCancel: { zh: '取消', en: 'Cancel' },
+  dialogSwitchBlockedTitle: { zh: '无法切换 profile', en: 'Cannot switch profile' },
+  dialogSwitchBlockedMessage: {
+    zh: '端口 {0} 上的 DSH 由外部启动，dsh-desktop 无法替它切换 profile。',
+    en: 'The DSH on port {0} was started externally; dsh-desktop cannot switch its profile.',
+  },
+  dialogSwitchBlockedDetail: {
+    zh: '已切回 profile「{0}」。请关闭外部 DSH 后再试。',
+    en: 'Reverted to profile "{0}". Close the external DSH and retry.',
+  },
+  dialogSwitchFailedTitle: { zh: '切换 profile 失败', en: 'Failed to switch profile' },
+  dialogSwitchFailedMessage: {
+    zh: '无法启动 profile「{0}」：{1}',
+    en: 'Could not start profile "{0}": {1}',
+  },
+  dialogSwitchFailedRestored: {
+    zh: '已恢复原 profile「{0}」。',
+    en: 'Restored the previous profile "{0}".',
+  },
+  dialogSwitchFailedRestoreFail: {
+    zh: '恢复原 profile 也失败了。请检查日志：{0}',
+    en: 'Restoring the previous profile also failed. Check the logs: {0}',
+  },
+  dialogRecoveryFailedTitle: { zh: 'DSH 自动恢复失败', en: 'DSH auto-recovery failed' },
+  dialogRecoveryFailedMessage: {
+    zh: '已尝试 {0} 次，仍无法恢复 DSH。',
+    en: 'DSH could not be recovered after {0} attempts.',
+  },
+  dialogRendererFailedTitle: { zh: '界面自动恢复失败', en: 'UI auto-recovery failed' },
+  dialogRendererFailedMessage: {
+    zh: '界面多次崩溃，请从托盘重启 dsh-desktop。',
+    en: 'The UI crashed repeatedly; restart dsh-desktop from the tray.',
+  },
+  dialogLogsDetail: { zh: '请检查日志：{0}', en: 'Check the logs: {0}' },
+  notifyUpdateTitle: { zh: 'dsh-desktop 有新版本', en: 'dsh-desktop update available' },
+  notifyUpdateBody: { zh: 'v{0} 已发布，可从托盘菜单下载。', en: 'v{0} is available from the tray menu.' },
+  notifyRecoveredTitle: { zh: 'DSH 已自动恢复', en: 'DSH recovered automatically' },
+  notifyRecoverFailedTitle: { zh: 'DSH 自动恢复失败', en: 'DSH auto-recovery failed' },
+  notifyUpdateNone: { zh: '当前已是最新版本（v{0}）。', en: 'You are on the latest version (v{0}).' },
+  notifyUpdateFound: { zh: '新版本 v{0} 可用，正在打开下载页面…', en: 'v{0} is available; opening the download page…' },
+  notifyUpdateError: { zh: '检查更新失败：{0}', en: 'Update check failed: {0}' },
+} satisfies Record<string, { zh: string; en: string }>
+
+type MessageKey = keyof typeof messages
+
+function t(key: MessageKey, ...args: (string | number)[]): string {
+  let text: string = messages[key][locale]
+  args.forEach((arg, index) => {
+    text = text.replaceAll(`{${index}}`, String(arg))
+  })
+  return text
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
+}
+
+function primaryDshUrl(): string {
+  return `http://${DSH_HOST}:${settings.port}`
+}
+
+function appIconPath(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'assets', 'icon.png')
+}
+
+function notify(title: string, body: string, onClick?: () => void): void {
+  if (!Notification.isSupported()) return
+  const notification = new Notification({ title, body, icon: appIconPath() })
+  if (onClick) notification.once('click', onClick)
+  notification.show()
+}
+
+function logDirectory(): string {
+  const directory = app.getPath('logs')
+  mkdirSync(directory, { recursive: true })
+  return directory
+}
+
+function writeRecoveryLog(message: string): void {
+  const timestamp = new Date().toISOString()
+  writeFileSync(join(logDirectory(), 'recovery.log'), `[${timestamp}] ${message}\n`, { flag: 'a' })
+}
+
+function readLogTail(name: string, maxBytes = 128 * 1024): string {
+  try {
+    const filePath = join(logDirectory(), name)
+    const fd = openSync(filePath, 'r')
+    try {
+      const size = fstatSync(fd).size
+      const length = Math.min(size, maxBytes)
+      const buffer = Buffer.alloc(length)
+      readSync(fd, buffer, 0, length, size - length)
+      const text = buffer.toString('utf8')
+      return size > maxBytes ? `…\n${text}` : text
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    return ''
+  }
+}
+
+function canConnect(port: number): Promise<boolean> {
   return new Promise((resolveConnection) => {
-    const socket = net.createConnection({ host: DSH_HOST, port: DSH_PORT })
+    const socket = net.createConnection({ host: DSH_HOST, port })
     const finish = (result: boolean): void => {
       socket.destroy()
       resolveConnection(result)
@@ -54,9 +250,9 @@ function canConnect(): Promise<boolean> {
   })
 }
 
-function isDshReady(): Promise<boolean> {
+function isDshReady(url: string): Promise<boolean> {
   return new Promise((resolveReady) => {
-    const request = http.get(DSH_URL, { timeout: 1_000 }, (response) => {
+    const request = http.get(url, { timeout: 1_000 }, (response) => {
       response.resume()
       resolveReady((response.statusCode ?? 500) < 500)
     })
@@ -68,46 +264,86 @@ function isDshReady(): Promise<boolean> {
   })
 }
 
-async function waitForDsh(timeoutMs = 60_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (await isDshReady()) return
-    if (dshStartupError) throw dshStartupError
-    if (dshProcess?.exitCode !== null) {
-      throw new Error(`DSH exited before becoming ready (code ${dshProcess?.exitCode ?? 'unknown'}).`)
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500))
-  }
-  throw new Error(`DSH did not become ready within ${timeoutMs / 1_000} seconds.`)
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.unref()
+    server.once('error', reject)
+    server.listen(0, DSH_HOST, () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : 0
+      server.close(() => (port ? resolve(port) : reject(new Error('No free port available.'))))
+    })
+  })
 }
 
-function sendStatus(message: string): void {
-  mainWindow?.webContents.send('dsh:status', message)
+function killProcessTree(pid: number | undefined): Promise<void> {
+  if (!pid) return Promise.resolve()
+  return execFileAsync('taskkill.exe', ['/pid', String(pid), '/t', '/f'], { windowsHide: true })
+    .then(() => undefined)
+    .catch(() => {
+      // The process may already have exited.
+    })
 }
 
-function appIconPath(): string {
-  return app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'assets', 'icon.png')
+function isTrustedRenderer(sender: WebContents): boolean {
+  const url = sender.getURL()
+  if (process.env.ELECTRON_RENDERER_URL) return url.startsWith(process.env.ELECTRON_RENDERER_URL)
+  return url.startsWith('file:')
 }
 
-function appearanceSettingsPath(): string {
-  return join(app.getPath('userData'), 'appearance.json')
+// ---------------------------------------------------------------------------
+// Settings (migrates the former appearance.json / profile.json files)
+// ---------------------------------------------------------------------------
+
+function settingsPath(): string {
+  return join(app.getPath('userData'), 'settings.json')
 }
 
-function loadFrameColor(): FrameColor {
+function legacySetting<T>(fileName: string, key: string): T | null {
   try {
-    const settings = JSON.parse(readFileSync(appearanceSettingsPath(), 'utf8')) as { frameColor?: unknown }
-    return settings.frameColor === 'white' ? 'white' : 'black'
+    const parsed = JSON.parse(readFileSync(join(app.getPath('userData'), fileName), 'utf8')) as Record<string, unknown>
+    return (parsed[key] ?? null) as T | null
   } catch {
-    return 'black'
+    return null
   }
 }
 
-function setFrameColor(color: FrameColor): void {
-  frameColor = color
-  writeFileSync(appearanceSettingsPath(), `${JSON.stringify({ frameColor }, null, 2)}\n`, 'utf8')
-  mainWindow?.webContents.send('appearance:frame-color', frameColor)
-  updateTrayMenu()
+function loadSettings(): AppSettings {
+  const loaded: AppSettings = { frameColor: 'black', profile: DEFAULT_PROFILE, port: DEFAULT_DSH_PORT, startHidden: false }
+  let fromFile = false
+  try {
+    Object.assign(loaded, JSON.parse(readFileSync(settingsPath(), 'utf8')) as Partial<AppSettings>)
+    fromFile = true
+  } catch {
+    // First run; fall back to the legacy files below.
+  }
+  if (!fromFile) {
+    if (legacySetting<FrameColor>('appearance.json', 'frameColor') === 'white') loaded.frameColor = 'white'
+    const profile = legacySetting<string>('profile.json', 'profile')
+    if (profile) loaded.profile = profile
+  }
+  if (loaded.frameColor !== 'black' && loaded.frameColor !== 'white') loaded.frameColor = 'black'
+  if (!loaded.profile) loaded.profile = DEFAULT_PROFILE
+  if (!Number.isInteger(loaded.port) || loaded.port < 1 || loaded.port > 65535) loaded.port = DEFAULT_DSH_PORT
+  if (typeof loaded.startHidden !== 'boolean') loaded.startHidden = false
+  return loaded
 }
+
+function saveSettings(): void {
+  writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, 'utf8')
+}
+
+function applyLoginItems(enabled: boolean): void {
+  app.setLoginItemSettings({
+    openAtLogin: enabled,
+    args: enabled && settings.startHidden ? ['--hidden'] : [],
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Profiles
+// ---------------------------------------------------------------------------
 
 function profilesDirectory(): string {
   return join(homedir(), '.dsh', 'profiles')
@@ -125,158 +361,17 @@ function listProfiles(): string[] {
   }
 }
 
-function profileSettingsPath(): string {
-  return join(app.getPath('userData'), 'profile.json')
-}
-
-function loadProfile(): string {
-  try {
-    const settings = JSON.parse(readFileSync(profileSettingsPath(), 'utf8')) as { profile?: unknown }
-    if (typeof settings.profile === 'string' && settings.profile) return settings.profile
-  } catch {
-    // Missing or unreadable settings fall back to the default profile.
-  }
-  return DEFAULT_PROFILE
-}
-
-function saveProfile(name: string): void {
-  currentProfile = name
-  writeFileSync(profileSettingsPath(), `${JSON.stringify({ profile: currentProfile }, null, 2)}\n`, 'utf8')
-}
-
-async function listeningPid(port: number): Promise<number | null> {
-  try {
-    const { stdout } = await execFileAsync('netstat.exe', ['-ano', '-p', 'tcp'], { timeout: 5_000, windowsHide: true })
-    for (const line of stdout.split('\n')) {
-      const match = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/)
-      if (match && Number(match[1]) === port) return Number(match[2])
-    }
-  } catch {
-    // netstat unavailable; the caller treats this as "unknown".
-  }
-  return null
-}
-
-async function processCommandLine(pid: number): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync(
-      'powershell.exe',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
-      { timeout: 5_000, windowsHide: true },
-    )
-    return stdout.trim() || null
-  } catch {
-    return null
-  }
-}
-
-function profileFromCommandLine(commandLine: string): string | null {
-  if (!/\bdsh(\.cmd|\.ps1|\.exe)?\b/i.test(commandLine)) return null
-  const flagged = commandLine.match(/--profile[= ]"?([^\s"]+)"?/i)
-  return flagged ? flagged[1] : DEFAULT_PROFILE
-}
-
-async function runningDshProfile(): Promise<string | null> {
-  const pid = await listeningPid(DSH_PORT)
-  if (!pid) return null
-  const commandLine = await processCommandLine(pid)
-  if (!commandLine) return null
-  return profileFromCommandLine(commandLine)
-}
-
-async function switchProfile(name: string): Promise<void> {
-  if (name === currentProfile || quitting || recoveringDsh || switchingProfile) return
-  switchingProfile = true
-  const previousProfile = currentProfile
-  saveProfile(name)
-  updateTrayMenu()
-
-  try {
-    sendStatus(`正在切换到 profile「${name}」…`)
-    await showLocalLoadingScreen()
-    await stopOwnedDsh()
-
-    if (await canConnect()) {
-      saveProfile(previousProfile)
-      updateTrayMenu()
-      sendStatus(`端口 ${DSH_PORT} 被外部启动的 DSH 占用，无法切换 profile。`)
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        await dialog.showMessageBox(mainWindow, {
-          type: 'warning',
-          title: '无法切换 profile',
-          message: `端口 ${DSH_PORT} 上的 DSH 由外部启动，dsh-desktop 无法替它切换 profile。`,
-          detail: `已切回 profile「${previousProfile}」。请关闭外部 DSH 后再试。`,
-        })
-        await mainWindow.loadURL(DSH_URL)
-      }
-      return
-    }
-
-    try {
-      await startDsh()
-      dshReady = true
-      sendStatus(`profile「${name}」已就绪，正在打开界面…`)
-      if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(DSH_URL)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      writeRecoveryLog(`Switch to profile "${name}" failed: ${message}`)
-      saveProfile(previousProfile)
-      updateTrayMenu()
-
-      let restored = false
-      try {
-        sendStatus(`切换失败，正在恢复 profile「${previousProfile}」…`)
-        await startDsh()
-        dshReady = true
-        restored = true
-      } catch (restoreError) {
-        const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError)
-        writeRecoveryLog(`Restoring profile "${previousProfile}" failed: ${restoreMessage}`)
-        sendStatus(`恢复 profile 失败：${restoreMessage}`)
-      }
-      if (restored && mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(DSH_URL)
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        await dialog.showMessageBox(mainWindow, {
-          type: 'error',
-          title: '切换 profile 失败',
-          message: `无法启动 profile「${name}」：${message}`,
-          detail: restored
-            ? `已恢复原 profile「${previousProfile}」。`
-            : `恢复原 profile 也失败了。请检查日志：${app.getPath('logs')}`,
-        })
-      }
-    }
-  } finally {
-    switchingProfile = false
-    updateTrayMenu()
-  }
-}
-
-function buildProfileMenu(): MenuItemConstructorOptions[] {
-  const root = profilesDirectory()
-  if (!existsSync(root)) {
-    return [{ label: `（未找到目录 ${root}）`, enabled: false }]
-  }
-  const profiles = listProfiles()
-  if (profiles.length === 0) {
-    return [{ label: `（${root} 中没有包含 cordis.yml 的 profile）`, enabled: false }]
-  }
-  return profiles.map((name) => ({
-    label: name,
-    type: 'radio' as const,
-    checked: name === currentProfile,
-    click: () => void switchProfile(name),
-  }))
-}
-
 function quoteCmdArgument(argument: string): string {
   if (!/[\s"]/.test(argument)) return argument
   return `"${argument.replace(/"/g, '""')}"`
 }
 
-function dshLaunch(): { command: string; args: string[] } {
-  const dshArgs = ['--profile', currentProfile, '--no-open']
+function dshArgsFor(profile: string, port: number): string[] {
+  return ['--profile', profile, '--port', String(port), '--no-open']
+}
+
+function dshLaunch(profile: string, port: number): { command: string; args: string[] } {
+  const dshArgs = dshArgsFor(profile, port)
   const powershellLauncher = process.env.APPDATA ? join(process.env.APPDATA, 'npm', 'dsh.ps1') : null
   if (powershellLauncher && existsSync(powershellLauncher)) {
     return {
@@ -297,39 +392,129 @@ function dshLaunch(): { command: string; args: string[] } {
   return { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', `dsh ${quoted.join(' ')}`] }
 }
 
+async function listeningPid(port: number): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('netstat.exe', ['-ano', '-p', 'tcp'], { timeout: 5_000, windowsHide: true })
+    for (const line of stdout.split('\n')) {
+      const match = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/)
+      if (match && Number(match[1]) === port) return Number(match[2])
+    }
+  } catch {
+    // netstat unavailable; the caller treats this as "unknown".
+  }
+  return null
+}
+
+async function processCommandLine(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+      ],
+      { timeout: 5_000, windowsHide: true },
+    )
+    return stdout.trim() || null
+  } catch {
+    return null
+  }
+}
+
+function profileFromCommandLine(commandLine: string): string | null {
+  if (!/\bdsh(\.cmd|\.ps1|\.exe)?\b/i.test(commandLine)) return null
+  const flagged = commandLine.match(/--profile[= ]"?([^\s"]+)"?/i)
+  return flagged ? flagged[1] : DEFAULT_PROFILE
+}
+
+async function runningDshProfile(port: number): Promise<string | null> {
+  const pid = await listeningPid(port)
+  if (!pid) return null
+  const commandLine = await processCommandLine(pid)
+  if (!commandLine) return null
+  return profileFromCommandLine(commandLine)
+}
+
+async function dshVersion(): Promise<string> {
+  if (cachedDshVersion !== null) return cachedDshVersion
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'dsh --version'],
+      { timeout: 15_000, windowsHide: true },
+    )
+    cachedDshVersion = stdout.trim()
+  } catch {
+    cachedDshVersion = ''
+  }
+  return cachedDshVersion
+}
+
+// ---------------------------------------------------------------------------
+// Primary DSH instance (the one the main window hosts)
+// ---------------------------------------------------------------------------
+
+function sendStatus(message: string): void {
+  mainWindow?.webContents.send('dsh:status', message)
+}
+
+function sendStatusTo(window: BrowserWindow, message: string): void {
+  if (!window.isDestroyed()) window.webContents.send('dsh:status', message)
+}
+
+function sendGuidance(guidance: Guidance): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('dsh:guidance', guidance)
+}
+
+async function waitUntilReady(url: string, timeoutMs: number, child: ChildProcess | null): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await isDshReady(url)) return
+    if (dshStartupError) throw dshStartupError
+    if (child && child.exitCode !== null) {
+      throw new Error(t('errorExitedEarly', child.exitCode ?? '?'))
+    }
+    await delay(500)
+  }
+  throw new Error(t('errorNotReadyTimeout', timeoutMs / 1_000))
+}
+
 async function startDsh(): Promise<'attached' | 'started'> {
-  if (await canConnect()) {
-    const runningProfile = await runningDshProfile()
-    if (runningProfile && runningProfile !== currentProfile && mainWindow && !mainWindow.isDestroyed()) {
+  dshStartupError = null
+  const url = primaryDshUrl()
+  if (await canConnect(settings.port)) {
+    const runningProfile = await runningDshProfile(settings.port)
+    if (runningProfile && runningProfile !== settings.profile && mainWindow && !mainWindow.isDestroyed()) {
       const choice = await dialog.showMessageBox(mainWindow, {
         type: 'warning',
-        title: 'profile 不一致',
-        message: `端口 ${DSH_PORT} 上已运行的 DSH 使用 profile「${runningProfile}」，与当前选择的「${currentProfile}」不一致。`,
-        detail: '该 DSH 不是 dsh-desktop 启动的，无法替它切换 profile。可以连接现有实例，或关闭它后重试。',
-        buttons: ['连接现有实例', '取消'],
+        title: t('dialogProfileMismatchTitle'),
+        message: t('dialogProfileMismatchMessage', settings.port, runningProfile, settings.profile),
+        detail: t('dialogProfileMismatchDetail'),
+        buttons: [t('dialogAttach'), t('dialogCancel')],
         defaultId: 0,
         cancelId: 1,
       })
       if (choice.response === 1) {
-        throw new Error(`已取消连接使用 profile「${runningProfile}」的现有 DSH。`)
+        throw new Error(t('errorAttachCancelled', runningProfile))
       }
     }
     sendStatus(
       runningProfile
-        ? `检测到已运行的 DSH（profile：${runningProfile}），正在连接…`
-        : '检测到已运行的 DSH（无法确认其 profile），正在连接…',
+        ? t('statusConnectingExisting', runningProfile)
+        : t('statusConnectingUnknown'),
     )
-    await waitForDsh(15_000)
+    await waitUntilReady(url, 15_000, null)
     return 'attached'
   }
 
-  sendStatus('正在启动 DeepSeek Harness…')
-  const logDirectory = app.getPath('logs')
-  mkdirSync(logDirectory, { recursive: true })
-  const stdout = createWriteStream(join(logDirectory, 'dsh.stdout.log'), { flags: 'a' })
-  const stderr = createWriteStream(join(logDirectory, 'dsh.stderr.log'), { flags: 'a' })
+  sendStatus(t('statusStarting'))
+  const stdout = createWriteStream(join(logDirectory(), 'dsh.stdout.log'), { flags: 'a' })
+  const stderr = createWriteStream(join(logDirectory(), 'dsh.stderr.log'), { flags: 'a' })
 
-  const launch = dshLaunch()
+  const launch = dshLaunch(settings.profile, settings.port)
   dshStartupError = null
   dshProcess = spawn(launch.command, launch.args, {
     env: process.env,
@@ -357,33 +542,34 @@ async function startDsh(): Promise<'attached' | 'started'> {
     if (shouldRecover) void recoverDsh()
   })
 
-  await waitForDsh()
+  await waitUntilReady(url, 60_000, dshProcess)
   dshReady = true
   return 'started'
 }
 
-async function showLocalLoadingScreen(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  if (process.env.ELECTRON_RENDERER_URL) {
-    await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
-  } else {
-    await mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-  }
+async function stopOwnedDsh(): Promise<void> {
+  // Clearing dshReady first keeps the exit handler from treating our own
+  // shutdown as a crash and racing recovery against the caller.
+  dshReady = false
+  const pid = dshProcess?.pid
+  dshProcess = null
+  await killProcessTree(pid)
 }
 
 async function recoverDsh(): Promise<void> {
   if (recoveringDsh || quitting) return
   recoveringDsh = true
   try {
-    await showLocalLoadingScreen()
+    await loadLocalPage(mainWindow, 'index.html')
     for (let attempt = 1; attempt <= MAX_RECOVERY_ATTEMPTS && !quitting; attempt += 1) {
-      sendStatus(`DSH 意外退出，正在自动恢复（${attempt}/${MAX_RECOVERY_ATTEMPTS}）…`)
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, attempt * 1_000))
+      sendStatus(t('statusRecovering', attempt, MAX_RECOVERY_ATTEMPTS))
+      await delay(attempt * 1_000)
       try {
         await startDsh()
         if (!mainWindow || mainWindow.isDestroyed()) return
-        sendStatus('DSH 已恢复，正在重新打开界面…')
-        await mainWindow.loadURL(DSH_URL)
+        sendStatus(t('statusReady'))
+        await mainWindow.loadURL(primaryDshUrl())
+        notify(t('notifyRecoveredTitle'), t('statusReady'))
         return
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -393,9 +579,9 @@ async function recoverDsh(): Promise<void> {
     if (!quitting && mainWindow && !mainWindow.isDestroyed()) {
       await dialog.showMessageBox(mainWindow, {
         type: 'error',
-        title: 'DSH 自动恢复失败',
-        message: `已尝试 ${MAX_RECOVERY_ATTEMPTS} 次，仍无法恢复 DSH。`,
-        detail: `请检查日志：${app.getPath('logs')}`,
+        title: t('dialogRecoveryFailedTitle'),
+        message: t('dialogRecoveryFailedMessage', MAX_RECOVERY_ATTEMPTS),
+        detail: t('dialogLogsDetail', app.getPath('logs')),
       })
     }
   } finally {
@@ -403,99 +589,275 @@ async function recoverDsh(): Promise<void> {
   }
 }
 
-function writeRecoveryLog(message: string): void {
-  const logDirectory = app.getPath('logs')
-  mkdirSync(logDirectory, { recursive: true })
-  const timestamp = new Date().toISOString()
-  writeFileSync(join(logDirectory, 'recovery.log'), `[${timestamp}] ${message}\n`, { flag: 'a' })
-}
-
-async function stopOwnedDsh(): Promise<void> {
-  // Clearing dshReady first keeps the exit handler from treating our own
-  // shutdown as a crash and racing recovery against the caller.
-  dshReady = false
-  const windowsProcessId = dshProcess?.pid
-  if (!windowsProcessId) return
-  dshProcess = null
+async function switchProfile(name: string): Promise<void> {
+  if (name === settings.profile || quitting || recoveringDsh || switchingProfile || startingPrimary) return
+  switchingProfile = true
+  const previousProfile = settings.profile
+  settings.profile = name
+  saveSettings()
+  updateTrayMenu()
 
   try {
-    await execFileAsync('taskkill.exe', ['/pid', String(windowsProcessId), '/t', '/f'], { windowsHide: true })
-  } catch {
-    // The process may already have exited.
+    sendStatus(t('statusSwitching', name))
+    if (mainWindow && !mainWindow.isDestroyed()) await loadLocalPage(mainWindow, 'index.html')
+    await stopOwnedDsh()
+
+    if (await canConnect(settings.port)) {
+      settings.profile = previousProfile
+      saveSettings()
+      updateTrayMenu()
+      sendStatus(t('statusPortBusy', settings.port))
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: t('dialogSwitchBlockedTitle'),
+          message: t('dialogSwitchBlockedMessage', settings.port),
+          detail: t('dialogSwitchBlockedDetail', previousProfile),
+        })
+        await mainWindow.loadURL(primaryDshUrl())
+      }
+      return
+    }
+
+    try {
+      await startDsh()
+      dshReady = true
+      sendStatus(t('statusReadyProfile', name))
+      if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(primaryDshUrl())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      writeRecoveryLog(`Switch to profile "${name}" failed: ${message}`)
+      settings.profile = previousProfile
+      saveSettings()
+      updateTrayMenu()
+
+      let restored = false
+      try {
+        sendStatus(t('statusSwitchFailedRestore', previousProfile))
+        await startDsh()
+        dshReady = true
+        restored = true
+      } catch (restoreError) {
+        const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError)
+        writeRecoveryLog(`Restoring profile "${previousProfile}" failed: ${restoreMessage}`)
+        sendStatus(t('statusSwitchFailedRestoreFail', restoreMessage))
+      }
+      if (restored && mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(primaryDshUrl())
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'error',
+          title: t('dialogSwitchFailedTitle'),
+          message: t('dialogSwitchFailedMessage', name, message),
+          detail: restored
+            ? t('dialogSwitchFailedRestored', previousProfile)
+            : t('dialogSwitchFailedRestoreFail', app.getPath('logs')),
+        })
+      }
+    }
+  } finally {
+    switchingProfile = false
+    updateTrayMenu()
   }
 }
 
-async function restartApp(): Promise<void> {
-  if (restarting) return
-  restarting = true
-  quitting = true
-  await stopOwnedDsh()
-  app.relaunch()
-  app.exit(0)
-}
+// ---------------------------------------------------------------------------
+// Extra per-profile windows (each DSH instance on its own port)
+// ---------------------------------------------------------------------------
 
-function createWindow(): BrowserWindow {
-  let windowResponsive = true
-  const window = new BrowserWindow({
-    width: 1440,
-    height: 920,
-    minWidth: 960,
-    minHeight: 640,
-    frame: false,
-    show: false,
-    autoHideMenuBar: true,
-    title: 'dsh-desktop',
-    icon: appIconPath(),
-    backgroundColor: '#0b1220',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
+function spawnExtraProcess(entry: ExtraDshWindow): void {
+  const { profile } = entry
+  const stdout = createWriteStream(join(logDirectory(), `dsh.${profile}.stdout.log`), { flags: 'a' })
+  const stderr = createWriteStream(join(logDirectory(), `dsh.${profile}.stderr.log`), { flags: 'a' })
+  const launch = dshLaunch(profile, entry.port)
+  entry.process = spawn(launch.command, launch.args, {
+    env: process.env,
+    shell: false,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
-  window.setMenuBarVisibility(false)
-
-  window.once('ready-to-show', () => window.show())
-  window.on('close', (event) => {
-    if (!quitting) {
-      event.preventDefault()
-      window.hide()
+  entry.process.stdout?.pipe(stdout)
+  entry.process.stderr?.pipe(stderr)
+  entry.process.once('exit', () => {
+    stdout.end()
+    stderr.end()
+    if (quitting || entry.window.isDestroyed()) return
+    entry.recoveryAttempts += 1
+    if (entry.recoveryAttempts <= MAX_RECOVERY_ATTEMPTS) {
+      writeRecoveryLog(`Profile window "${profile}" exited; recovery attempt ${entry.recoveryAttempts}.`)
+      void recoverProfileWindow(entry)
+    } else {
+      notify(t('notifyRecoverFailedTitle'), `${profile}: ${t('dialogRecoveryFailedMessage', MAX_RECOVERY_ATTEMPTS)}`)
+      entry.window.destroy()
     }
   })
+}
+
+async function openProfileWindow(profile: string): Promise<void> {
+  const existing = extraDshWindows.find((entry) => entry.profile === profile)
+  if (existing) {
+    existing.window.show()
+    existing.window.focus()
+    return
+  }
+  if (profile === settings.profile && dshReady) {
+    mainWindow?.show()
+    mainWindow?.focus()
+    return
+  }
+
+  const port = await freePort()
+  const url = `http://${DSH_HOST}:${port}`
+  const window = createAppWindow({ title: `dsh-desktop · ${profile}` })
+  const entry: ExtraDshWindow = { profile, port, url, process: null, window, recoveryAttempts: 0 }
+  extraDshWindows.push(entry)
+
+  const detach = (): void => {
+    const index = extraDshWindows.indexOf(entry)
+    if (index >= 0) extraDshWindows.splice(index, 1)
+    void killProcessTree(entry.process?.pid)
+    entry.process = null
+  }
+  window.once('closed', detach)
+
+  try {
+    await loadLocalPage(window, 'index.html')
+    sendStatusTo(window, t('statusStartingProfile', profile))
+    spawnExtraProcess(entry)
+    await waitUntilReadyFor(url, 60_000, entry.process)
+    if (window.isDestroyed()) return
+    sendStatusTo(window, t('statusReadyProfile', profile))
+    await window.loadURL(url)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    writeRecoveryLog(`Opening profile window "${profile}" failed: ${message}`)
+    if (!window.isDestroyed()) window.destroy()
+    else detach()
+  }
+}
+
+async function recoverProfileWindow(entry: ExtraDshWindow): Promise<void> {
+  const { window, profile } = entry
+  try {
+    await loadLocalPage(window, 'index.html')
+    sendStatusTo(window, t('statusStartingProfile', profile))
+    spawnExtraProcess(entry)
+    await waitUntilReadyFor(entry.url, 60_000, entry.process)
+    if (window.isDestroyed()) return
+    await window.loadURL(entry.url)
+    entry.recoveryAttempts = 0
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    writeRecoveryLog(`Recovering profile window "${profile}" failed: ${message}`)
+    if (!window.isDestroyed()) window.destroy()
+  }
+}
+
+async function waitUntilReadyFor(url: string, timeoutMs: number, child: ChildProcess | null): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await isDshReady(url)) return
+    if (child && child.exitCode !== null) throw new Error(t('errorExitedEarly', child.exitCode ?? '?'))
+    await delay(500)
+  }
+  throw new Error(t('errorNotReadyTimeout', timeoutMs / 1_000))
+}
+
+// ---------------------------------------------------------------------------
+// Update checks
+// ---------------------------------------------------------------------------
+
+function compareVersions(a: string, b: string): number {
+  const parse = (value: string): number[] =>
+    value.replace(/^v/, '').split('.').map((part) => Number(part.replace(/\D.*/, '')) || 0)
+  const [aParts, bParts] = [parse(a), parse(b)]
+  for (let index = 0; index < Math.max(aParts.length, bParts.length); index += 1) {
+    const difference = (aParts[index] ?? 0) - (bParts[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+async function checkForUpdates(trigger: 'auto' | 'tray' | 'settings'): Promise<UpdateResult> {
+  const current = app.getVersion()
+  const result: UpdateResult = { current, latest: null, newer: false, releaseUrl: null, error: null }
+  try {
+    const response = await electronNet.fetch(UPDATE_FEED_URL, {
+      headers: { 'User-Agent': `dsh-desktop/${current}` },
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const data = (await response.json()) as { tag_name?: string }
+    result.latest = data.tag_name?.replace(/^v/, '') ?? null
+    result.releaseUrl = 'https://github.com/Yuel25/dsh-desktop/releases/latest'
+    result.newer = result.latest !== null && compareVersions(result.latest, current) > 0
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error)
+  }
+
+  if (result.newer && result.latest) {
+    latestAvailableVersion = result.latest
+    updateTrayMenu()
+    if (trigger === 'auto') {
+      notify(t('notifyUpdateTitle'), t('notifyUpdateBody', result.latest))
+    } else if (trigger === 'tray') {
+      notify(t('notifyUpdateTitle'), t('notifyUpdateFound', result.latest))
+      void shell.openExternal(result.releaseUrl ?? 'https://github.com/Yuel25/dsh-desktop/releases')
+    }
+  } else if (trigger === 'tray') {
+    if (result.error) notify(t('notifyUpdateTitle'), t('notifyUpdateError', result.error))
+    else notify(t('notifyUpdateTitle'), t('notifyUpdateNone', current))
+  }
+  return result
+}
+
+// ---------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------
+
+function loadLocalPage(window: BrowserWindow | null, page: string): Promise<void> {
+  if (!window || window.isDestroyed()) return Promise.resolve()
+  if (process.env.ELECTRON_RENDERER_URL) {
+    return window.loadURL(`${process.env.ELECTRON_RENDERER_URL}/${page}`)
+  }
+  return window.loadFile(join(__dirname, '../renderer', page))
+}
+
+function attachRendererGuards(window: BrowserWindow): void {
+  let windowResponsive = true
+  let attempts = 0
+  let stableTimer: NodeJS.Timeout | null = null
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
   })
   window.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(DSH_URL) && !url.startsWith('file:')) {
+    if (!url.startsWith('file:') && !/^http:\/\/(127\.0\.0\.1|localhost):\d+/.test(url)) {
       event.preventDefault()
       void shell.openExternal(url)
     }
   })
   window.webContents.on('render-process-gone', (_event, details) => {
     if (quitting || details.reason === 'clean-exit') return
-    if (rendererStableTimer) clearTimeout(rendererStableTimer)
-    rendererRecoveryAttempts += 1
-    writeRecoveryLog(`Renderer process gone (${details.reason}), attempt ${rendererRecoveryAttempts}.`)
-    if (rendererRecoveryAttempts <= MAX_RECOVERY_ATTEMPTS) {
+    if (stableTimer) clearTimeout(stableTimer)
+    attempts += 1
+    writeRecoveryLog(`Renderer process gone (${details.reason}), attempt ${attempts}.`)
+    if (attempts <= MAX_RECOVERY_ATTEMPTS) {
       setTimeout(() => {
         if (!window.isDestroyed()) window.webContents.reload()
-      }, rendererRecoveryAttempts * 1_000)
+      }, attempts * 1_000)
     } else {
       void dialog.showMessageBox(window, {
         type: 'error',
-        title: '界面自动恢复失败',
-        message: '界面多次崩溃，请从托盘重启 dsh-desktop。',
-        detail: `请检查日志：${app.getPath('logs')}`,
+        title: t('dialogRendererFailedTitle'),
+        message: t('dialogRendererFailedMessage'),
+        detail: t('dialogLogsDetail', app.getPath('logs')),
       })
     }
   })
   window.webContents.on('did-finish-load', () => {
-    if (rendererStableTimer) clearTimeout(rendererStableTimer)
-    rendererStableTimer = setTimeout(() => {
-      rendererRecoveryAttempts = 0
-      rendererStableTimer = null
+    if (stableTimer) clearTimeout(stableTimer)
+    stableTimer = setTimeout(() => {
+      attempts = 0
+      stableTimer = null
     }, 30_000)
   })
   window.on('unresponsive', () => {
@@ -510,8 +872,79 @@ function createWindow(): BrowserWindow {
   window.on('responsive', () => {
     windowResponsive = true
   })
+}
+
+function createAppWindow(options: {
+  title: string
+  width?: number
+  height?: number
+  minWidth?: number
+  minHeight?: number
+  hideOnClose?: boolean
+}): BrowserWindow {
+  const window = new BrowserWindow({
+    width: options.width ?? 1440,
+    height: options.height ?? 920,
+    minWidth: options.minWidth ?? 960,
+    minHeight: options.minHeight ?? 640,
+    frame: false,
+    show: false,
+    autoHideMenuBar: true,
+    title: options.title,
+    icon: appIconPath(),
+    backgroundColor: '#0b1220',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.mjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  })
+  window.setMenuBarVisibility(false)
+  attachRendererGuards(window)
+  if (options.hideOnClose) {
+    window.on('close', (event) => {
+      if (!quitting) {
+        event.preventDefault()
+        window.hide()
+      }
+    })
+  }
   return window
 }
+
+function createMainWindow(): BrowserWindow {
+  const window = createAppWindow({ title: 'dsh-desktop', hideOnClose: true })
+  window.once('ready-to-show', () => {
+    if (!launchHidden) window.show()
+  })
+  mainWindow = window
+  return window
+}
+
+function openSettingsWindow(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show()
+    settingsWindow.focus()
+    return
+  }
+  settingsWindow = createAppWindow({
+    title: `dsh-desktop · ${t('traySettings')}`,
+    width: 780,
+    height: 760,
+    minWidth: 560,
+    minHeight: 420,
+  })
+  settingsWindow.once('ready-to-show', () => settingsWindow?.show())
+  settingsWindow.on('closed', () => {
+    settingsWindow = null
+  })
+  void loadLocalPage(settingsWindow, 'settings.html')
+}
+
+// ---------------------------------------------------------------------------
+// Tray
+// ---------------------------------------------------------------------------
 
 function createTray(): void {
   const icon = nativeImage.createFromPath(appIconPath())
@@ -522,68 +955,140 @@ function createTray(): void {
   tray.on('right-click', () => updateTrayMenu())
 }
 
+function buildProfileMenu(): MenuItemConstructorOptions[] {
+  const root = profilesDirectory()
+  if (!existsSync(root)) {
+    return [{ label: t('trayNoProfilesDir', root), enabled: false }]
+  }
+  const profiles = listProfiles()
+  if (profiles.length === 0) {
+    return [{ label: t('trayNoProfiles', root), enabled: false }]
+  }
+  return profiles.map((name) => ({
+    label: name,
+    type: 'radio' as const,
+    checked: name === settings.profile,
+    click: () => void switchProfile(name),
+  }))
+}
+
+function buildExtraProfileMenu(): MenuItemConstructorOptions[] {
+  const profiles = listProfiles()
+  if (profiles.length === 0) {
+    return [{ label: t('trayNoProfiles', profilesDirectory()), enabled: false }]
+  }
+  return profiles.map((name) => {
+    if (name === settings.profile && dshReady) {
+      return { label: `${name} ${t('trayExtraProfilesHint')}`, enabled: false }
+    }
+    return { label: name, click: () => void openProfileWindow(name) }
+  })
+}
+
 function updateTrayMenu(): void {
-  tray?.setContextMenu(Menu.buildFromTemplate([
-    { label: '打开 dsh-desktop', click: () => mainWindow?.show() },
-    { label: '在浏览器中打开', click: () => void shell.openExternal(DSH_URL) },
-    { label: '重启 dsh-desktop', click: () => void restartApp() },
+  const template: MenuItemConstructorOptions[] = [
+    { label: t('trayOpen'), click: () => mainWindow?.show() },
+    { label: t('trayOpenBrowser'), click: () => void shell.openExternal(primaryDshUrl()) },
+    { label: t('traySettings'), click: () => openSettingsWindow() },
+    { label: t('trayRestart'), click: () => void restartApp() },
     {
-      label: '标题栏颜色',
+      label: t('trayFrameColor'),
       submenu: [
-        { label: '黑色', type: 'radio', checked: frameColor === 'black', click: () => setFrameColor('black') },
-        { label: '白色', type: 'radio', checked: frameColor === 'white', click: () => setFrameColor('white') },
+        { label: t('frameBlack'), type: 'radio', checked: settings.frameColor === 'black', click: () => setFrameColor('black') },
+        { label: t('frameWhite'), type: 'radio', checked: settings.frameColor === 'white', click: () => setFrameColor('white') },
       ],
     },
-    {
-      label: '切换 profile 目录',
-      submenu: buildProfileMenu(),
-    },
+    { label: t('trayProfiles'), submenu: buildProfileMenu() },
+    { label: t('trayExtraProfiles'), submenu: buildExtraProfileMenu() },
     { type: 'separator' },
     {
-      label: '开机自启动',
+      label: t('trayAutoStart'),
       type: 'checkbox',
       checked: app.getLoginItemSettings().openAtLogin,
-      click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+      click: (item) => applyLoginItems(item.checked),
     },
-    { label: '查看日志', click: () => void shell.openPath(app.getPath('logs')) },
-    { type: 'separator' },
-    {
-      label: '退出',
-      click: () => {
-        quitting = true
-        app.quit()
-      },
+    { label: t('trayViewLogs'), click: () => void shell.openPath(app.getPath('logs')) },
+    { label: t('trayCheckUpdate'), click: () => void checkForUpdates('tray') },
+  ]
+  if (latestAvailableVersion) {
+    template.splice(3, 0, {
+      label: t('trayDownloadUpdate', latestAvailableVersion),
+      click: () => void shell.openExternal('https://github.com/Yuel25/dsh-desktop/releases/latest'),
+    })
+  }
+  tray?.setContextMenu(Menu.buildFromTemplate([...template, { type: 'separator' }, {
+    label: t('trayQuit'),
+    click: () => {
+      quitting = true
+      app.quit()
     },
-  ]))
+  }]))
+}
+
+function setFrameColor(color: FrameColor): void {
+  settings.frameColor = color
+  saveSettings()
+  for (const window of [mainWindow, settingsWindow, ...extraDshWindows.map((entry) => entry.window)]) {
+    window?.webContents.send('appearance:frame-color', color)
+  }
+  updateTrayMenu()
+}
+
+async function restartApp(): Promise<void> {
+  if (restarting) return
+  restarting = true
+  quitting = true
+  await stopOwnedDsh()
+  app.relaunch()
+  app.exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------------
+
+function looksLikeDshMissing(message: string): boolean {
+  return /ENOENT|not recognized|not found|无法找到|找不到|不是内部或外部命令/i.test(message)
+}
+
+async function attemptStartup(): Promise<void> {
+  if (startingPrimary || quitting) return
+  startingPrimary = true
+  try {
+    sendGuidance(null)
+    await startDsh()
+    dshReady = true
+    sendStatus(t('statusReady'))
+    if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(primaryDshUrl())
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    writeRecoveryLog(`Startup failed: ${message}`)
+    const mode: GuidanceMode = looksLikeDshMissing(message) ? 'dsh-missing' : 'start-failed'
+    sendStatus(mode === 'dsh-missing' ? t('statusDshMissing') : message)
+    sendGuidance({ mode, message })
+  } finally {
+    startingPrimary = false
+    updateTrayMenu()
+  }
 }
 
 async function bootstrap(): Promise<void> {
-  frameColor = loadFrameColor()
+  settings = loadSettings()
   const availableProfiles = listProfiles()
-  currentProfile = loadProfile()
-  if (availableProfiles.length > 0 && !availableProfiles.includes(currentProfile)) {
-    currentProfile = DEFAULT_PROFILE
+  if (availableProfiles.length > 0 && !availableProfiles.includes(settings.profile)) {
+    settings.profile = DEFAULT_PROFILE
+    saveSettings()
   }
-  mainWindow = createWindow()
+  createMainWindow()
   createTray()
-  await showLocalLoadingScreen()
-
-  try {
-    await startDsh()
-    dshReady = true
-    sendStatus('DSH 已就绪，正在打开界面…')
-    await mainWindow.loadURL(DSH_URL)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    sendStatus(`启动失败：${message}`)
-    await dialog.showMessageBox(mainWindow, {
-      type: 'error',
-      title: 'dsh-desktop 启动失败',
-      message,
-      detail: `日志目录：${app.getPath('logs')}`,
-    })
-  }
+  await loadLocalPage(mainWindow, 'index.html')
+  await attemptStartup()
+  void checkForUpdates('auto')
 }
+
+// ---------------------------------------------------------------------------
+// App lifecycle
+// ---------------------------------------------------------------------------
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -596,44 +1101,166 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => void bootstrap())
 }
 
-function isTrustedRenderer(sender: WebContents): boolean {
-  const url = sender.getURL()
-  if (process.env.ELECTRON_RENDERER_URL) return url.startsWith(process.env.ELECTRON_RENDERER_URL)
-  return url.startsWith('file:')
+// ---------------------------------------------------------------------------
+// IPC
+// ---------------------------------------------------------------------------
+
+type SettingsSnapshot = {
+  frameColor: FrameColor
+  profile: string
+  port: number
+  startHidden: boolean
+  openAtLogin: boolean
+  profiles: string[]
+  locale: Locale
+  appVersion: string
 }
 
+function settingsSnapshot(): SettingsSnapshot {
+  return {
+    frameColor: settings.frameColor,
+    profile: settings.profile,
+    port: settings.port,
+    startHidden: settings.startHidden,
+    openAtLogin: app.getLoginItemSettings().openAtLogin,
+    profiles: listProfiles(),
+    locale,
+    appVersion: app.getVersion(),
+  }
+}
+
+ipcMain.handle('settings:get', (event) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  return settingsSnapshot()
+})
+
+ipcMain.handle('settings:set', (event, patch: Partial<Pick<AppSettings, 'frameColor' | 'profile' | 'port' | 'startHidden'>>) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  if (patch.frameColor === 'black' || patch.frameColor === 'white') setFrameColor(patch.frameColor)
+  if (typeof patch.startHidden === 'boolean') {
+    settings.startHidden = patch.startHidden
+    saveSettings()
+    applyLoginItems(app.getLoginItemSettings().openAtLogin)
+  }
+  if (typeof patch.port === 'number' && Number.isInteger(patch.port) && patch.port >= 1 && patch.port <= 65535) {
+    // Port changes take effect on the next app restart so the primary DSH
+    // instance is not pulled out from under the main window.
+    settings.port = patch.port
+    saveSettings()
+  }
+  if (typeof patch.profile === 'string' && patch.profile && patch.profile !== settings.profile) {
+    void switchProfile(patch.profile)
+  }
+  return settingsSnapshot()
+})
+
 ipcMain.handle('app:get-login-settings', (event) => {
-  if (!isTrustedRenderer(event.sender)) throw new Error('This API is only available to the local loading page.')
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
   return app.getLoginItemSettings().openAtLogin
 })
+
 ipcMain.handle('app:set-login-settings', (event, enabled: boolean) => {
-  if (!isTrustedRenderer(event.sender)) throw new Error('This API is only available to the local loading page.')
-  app.setLoginItemSettings({ openAtLogin: enabled })
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  applyLoginItems(enabled)
   return app.getLoginItemSettings().openAtLogin
 })
+
 ipcMain.handle('app:get-icon-data-url', () => {
   const icon = readFileSync(appIconPath())
   return `data:image/png;base64,${icon.toString('base64')}`
 })
-ipcMain.handle('appearance:get-frame-color', () => frameColor)
+
+ipcMain.handle('app:get-locale', () => locale)
+
+ipcMain.handle('appearance:get-frame-color', () => settings.frameColor)
+
+ipcMain.handle('window:get-profile', (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (window === mainWindow) return settings.profile
+  return extraDshWindows.find((entry) => entry.window === window)?.profile ?? null
+})
+
+ipcMain.handle('app:open-external', (event, url: string) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  if (!/^https:\/\/\S+$/.test(url)) throw new Error(t('errorExternalHttp'))
+  void shell.openExternal(url)
+})
+
+ipcMain.handle('app:open-logs-folder', (event) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  void shell.openPath(app.getPath('logs'))
+})
+
+ipcMain.handle('startup:retry', (event) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  void attemptStartup()
+})
+
+ipcMain.handle('profile:open-window', (event, profile: string) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  if (typeof profile === 'string' && profile) void openProfileWindow(profile)
+})
+
+ipcMain.handle('logs:read', (event, name: string) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  const allowed = ['dsh.stdout.log', 'dsh.stderr.log', 'recovery.log', ...listProfiles().flatMap((profile) => [`dsh.${profile}.stdout.log`, `dsh.${profile}.stderr.log`])]
+  if (typeof name !== 'string' || !allowed.includes(name)) throw new Error('Unknown log file.')
+  return readLogTail(name)
+})
+
+ipcMain.handle('diag:collect', async (event) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  return [
+    `app: dsh-desktop ${app.getVersion()}`,
+    `electron: ${process.versions.electron}`,
+    `node: ${process.versions.node}`,
+    `platform: ${process.platform} ${process.arch}`,
+    `locale: ${locale}`,
+    `dsh: ${await dshVersion()}` || 'dsh: (not detected)',
+    `profile: ${settings.profile}`,
+    `port: ${settings.port}`,
+    `profiles: ${listProfiles().join(', ') || '(none)'}`,
+  ].join('\n')
+})
+
+ipcMain.handle('update:check', (event) => {
+  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+  return checkForUpdates('settings')
+})
+
 ipcMain.on('window:minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize())
+
 ipcMain.on('window:toggle-maximize', (event) => {
   const window = BrowserWindow.fromWebContents(event.sender)
   if (!window) return
   if (window.isMaximized()) window.unmaximize()
   else window.maximize()
 })
-ipcMain.on('window:close', (event) => BrowserWindow.fromWebContents(event.sender)?.close())
+
+ipcMain.on('window:close', (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (!window) return
+  if (window === mainWindow) {
+    window.close()
+    return
+  }
+  window.destroy()
+})
 
 app.on('before-quit', () => {
   quitting = true
 })
+
 app.on('will-quit', (event) => {
-  if (dshProcess) {
+  const ownedPids = [dshProcess?.pid, ...extraDshWindows.map((entry) => entry.process?.pid)].filter(
+    (pid): pid is number => typeof pid === 'number',
+  )
+  if (ownedPids.length > 0) {
     event.preventDefault()
-    void stopOwnedDsh().finally(() => app.exit())
+    void Promise.all(ownedPids.map((pid) => killProcessTree(pid))).finally(() => app.exit())
   }
 })
+
 app.on('window-all-closed', () => {
   // The tray keeps the desktop app alive on Windows and Linux.
 })

@@ -3,6 +3,12 @@ import { contextBridge, ipcRenderer } from 'electron'
 const TITLEBAR_ID = 'dsh-desktop-titlebar'
 
 type FrameColor = 'black' | 'white'
+type Locale = 'zh' | 'en'
+
+const titlebarText = {
+  zh: { minimize: '最小化', maximize: '最大化', restore: '还原', close: '关闭' },
+  en: { minimize: 'Minimize', maximize: 'Maximize', restore: 'Restore', close: 'Close' },
+} as const
 
 function applyFrameColor(color: FrameColor): void {
   document.getElementById(TITLEBAR_ID)?.setAttribute('data-color', color)
@@ -10,6 +16,9 @@ function applyFrameColor(color: FrameColor): void {
 
 async function mountTitlebar(): Promise<void> {
   if (document.getElementById(TITLEBAR_ID)) return
+
+  const locale = (await ipcRenderer.invoke('app:get-locale')) as Locale
+  const text = titlebarText[locale] ?? titlebarText.zh
 
   const style = document.createElement('style')
   style.textContent = `
@@ -110,13 +119,13 @@ async function mountTitlebar(): Promise<void> {
       <span class="dsh-desktop-name">dsh-desktop</span>
     </div>
     <div class="dsh-desktop-controls">
-      <button class="dsh-desktop-minimize" title="最小化" aria-label="最小化">
+      <button class="dsh-desktop-minimize" title="${text.minimize}" aria-label="${text.minimize}">
         <svg viewBox="0 0 12 12"><path d="M1.5 6.5h9" /></svg>
       </button>
-      <button class="dsh-desktop-maximize" title="最大化" aria-label="最大化">
+      <button class="dsh-desktop-maximize" title="${text.maximize}" aria-label="${text.maximize}">
         <svg viewBox="0 0 12 12"><rect x="1.75" y="1.75" width="8.5" height="8.5" /></svg>
       </button>
-      <button class="dsh-desktop-close" title="隐藏到托盘" aria-label="隐藏到托盘">
+      <button class="dsh-desktop-close" title="${text.close}" aria-label="${text.close}">
         <svg viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8" /></svg>
       </button>
     </div>
@@ -147,6 +156,10 @@ async function mountTitlebar(): Promise<void> {
   }
   new MutationObserver(reattach).observe(document.documentElement, { childList: true, subtree: true })
 
+  const profile = (await ipcRenderer.invoke('window:get-profile')) as string | null
+  const name = titlebar.querySelector<HTMLSpanElement>('.dsh-desktop-name')
+  if (name && profile) name.textContent = `dsh-desktop · ${profile}`
+
   applyFrameColor(await ipcRenderer.invoke('appearance:get-frame-color') as FrameColor)
   const icon = titlebar.querySelector<HTMLImageElement>('.dsh-desktop-icon')
   if (icon) icon.src = await ipcRenderer.invoke('app:get-icon-data-url')
@@ -155,8 +168,9 @@ async function mountTitlebar(): Promise<void> {
 window.addEventListener('DOMContentLoaded', () => void mountTitlebar())
 ipcRenderer.on('appearance:frame-color', (_event, color: FrameColor) => applyFrameColor(color))
 
-// The DSH web page only needs the titlebar; the status/login bridge is for
-// dsh-desktop's own loading page, so keep it away from hosted app code.
+// The DSH web page only needs the titlebar; the bridge below is for
+// dsh-desktop's own local pages (loading screen and settings), so keep it
+// away from hosted app code.
 const localRendererOrigin = process.env.ELECTRON_RENDERER_URL
   ? new URL(process.env.ELECTRON_RENDERER_URL).origin
   : null
@@ -170,7 +184,29 @@ if (isLocalRenderer) {
       ipcRenderer.on('dsh:status', handler)
       return () => ipcRenderer.removeListener('dsh:status', handler)
     },
+    onGuidance: (listener: (guidance: { mode: string; message: string } | null) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, guidance: { mode: string; message: string } | null): void =>
+        listener(guidance)
+      ipcRenderer.on('dsh:guidance', handler)
+      return () => ipcRenderer.removeListener('dsh:guidance', handler)
+    },
+    getLocale: (): Promise<string> => ipcRenderer.invoke('app:get-locale'),
     getOpenAtLogin: (): Promise<boolean> => ipcRenderer.invoke('app:get-login-settings'),
     setOpenAtLogin: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke('app:set-login-settings', enabled),
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:open-external', url),
+    openLogsFolder: (): Promise<void> => ipcRenderer.invoke('app:open-logs-folder'),
+    retryStartup: (): Promise<void> => ipcRenderer.invoke('startup:retry'),
+    getSettings: () => ipcRenderer.invoke('settings:get'),
+    setSettings: (patch: Record<string, unknown>) => ipcRenderer.invoke('settings:set', patch),
+    openProfileWindow: (profile: string): Promise<void> => ipcRenderer.invoke('profile:open-window', profile),
+    readLog: (name: string): Promise<string> => ipcRenderer.invoke('logs:read', name),
+    collectDiagnostics: (): Promise<string> => ipcRenderer.invoke('diag:collect'),
+    checkUpdate: (): Promise<{
+      current: string
+      latest: string | null
+      newer: boolean
+      releaseUrl: string | null
+      error: string | null
+    }> => ipcRenderer.invoke('update:check'),
   })
 }
