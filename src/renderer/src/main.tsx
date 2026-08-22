@@ -40,9 +40,11 @@ function App(): React.JSX.Element {
     void desktop.getLocale().then((value) => setLocale(value))
     const stopStatus = desktop.onStatus(setStatus)
     const stopGuidance = desktop.onGuidance(setGuidance)
+    const stopLocale = desktop.onLocaleChanged(setLocale)
     return () => {
       stopStatus()
       stopGuidance()
+      stopLocale()
     }
   }, [])
 

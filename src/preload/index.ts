@@ -18,7 +18,8 @@ async function mountTitlebar(): Promise<void> {
   if (document.getElementById(TITLEBAR_ID)) return
 
   const locale = (await ipcRenderer.invoke('app:get-locale')) as Locale
-  const text = titlebarText[locale] ?? titlebarText.zh
+  let text = titlebarText[locale] ?? titlebarText.zh
+  let currentProfile: string | null = null
 
   const style = document.createElement('style')
   style.textContent = `
@@ -156,9 +157,33 @@ async function mountTitlebar(): Promise<void> {
   }
   new MutationObserver(reattach).observe(document.documentElement, { childList: true, subtree: true })
 
+  const applyTexts = (): void => {
+    const minimize = titlebar.querySelector<HTMLButtonElement>('.dsh-desktop-minimize')
+    const maximize = titlebar.querySelector<HTMLButtonElement>('.dsh-desktop-maximize')
+    const close = titlebar.querySelector<HTMLButtonElement>('.dsh-desktop-close')
+    const name = titlebar.querySelector<HTMLSpanElement>('.dsh-desktop-name')
+    if (minimize) {
+      minimize.title = text.minimize
+      minimize.setAttribute('aria-label', text.minimize)
+    }
+    if (maximize) {
+      maximize.title = text.maximize
+      maximize.setAttribute('aria-label', text.maximize)
+    }
+    if (close) {
+      close.title = text.close
+      close.setAttribute('aria-label', text.close)
+    }
+    if (name) name.textContent = currentProfile ? `dsh-desktop · ${currentProfile}` : 'dsh-desktop'
+  }
+
   const profile = (await ipcRenderer.invoke('window:get-profile')) as string | null
-  const name = titlebar.querySelector<HTMLSpanElement>('.dsh-desktop-name')
-  if (name && profile) name.textContent = `dsh-desktop · ${profile}`
+  currentProfile = profile
+  applyTexts()
+  ipcRenderer.on('app:locale-changed', (_event, nextLocale: Locale) => {
+    text = titlebarText[nextLocale] ?? titlebarText.zh
+    applyTexts()
+  })
 
   applyFrameColor(await ipcRenderer.invoke('appearance:get-frame-color') as FrameColor)
   const icon = titlebar.querySelector<HTMLImageElement>('.dsh-desktop-icon')
@@ -191,6 +216,11 @@ if (isLocalRenderer) {
       return () => ipcRenderer.removeListener('dsh:guidance', handler)
     },
     getLocale: (): Promise<string> => ipcRenderer.invoke('app:get-locale'),
+    onLocaleChanged: (listener: (locale: string) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, locale: string): void => listener(locale)
+      ipcRenderer.on('app:locale-changed', handler)
+      return () => ipcRenderer.removeListener('app:locale-changed', handler)
+    },
     getOpenAtLogin: (): Promise<boolean> => ipcRenderer.invoke('app:get-login-settings'),
     setOpenAtLogin: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke('app:set-login-settings', enabled),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:open-external', url),

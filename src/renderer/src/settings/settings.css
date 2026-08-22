@@ -36,6 +36,13 @@ body {
   color: #cfe0f7;
 }
 
+.settings h3 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: #8fa6c5;
+}
+
 .settings label {
   display: flex;
   align-items: center;

@@ -31,7 +31,7 @@
 - Automatically recovers from DSH service and renderer crashes and reports the outcome through system notifications
 - Attaches to an existing service on `127.0.0.1:3080`, identifying its profile first and prompting on mismatch
 - Shows an install guide with a retry button when the dsh command is missing
-- Bilingual UI and notifications (Chinese/English, following the system locale)
+- Bilingual UI and notifications (Chinese/English), following the system locale or set manually in settings
 - Keeps running in the tray and cleans up DSH processes owned by the app on exit
 - Captures DSH stdout/stderr logs (per-instance files for profile windows)
 - Produces a Windows NSIS installer

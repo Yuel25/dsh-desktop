@@ -8,6 +8,8 @@ const ui = {
     frameColor: '标题栏颜色',
     black: '黑色',
     white: '白色',
+    language: '语言',
+    languageSystem: '跟随系统',
     startup: '启动',
     openAtLogin: '开机自启动',
     startHidden: '自启动时隐藏到托盘（后台启动 DSH）',
@@ -39,6 +41,8 @@ const ui = {
     frameColor: 'Title bar color',
     black: 'Black',
     white: 'White',
+    language: 'Language',
+    languageSystem: 'Follow system',
     startup: 'Startup',
     openAtLogin: 'Launch at login',
     startHidden: 'Start hidden in tray at login (DSH starts in the background)',
@@ -93,7 +97,9 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     void refresh()
-  }, [refresh])
+    if (!desktop) return
+    return desktop.onLocaleChanged(() => void refresh())
+  }, [refresh, desktop])
 
   const logFiles = useMemo(() => {
     if (!settings) return ['dsh.stdout.log', 'dsh.stderr.log', 'recovery.log']
@@ -150,6 +156,18 @@ function App(): React.JSX.Element {
           />
           {text.white}
         </label>
+        <h3>{text.language}</h3>
+        {(['system', 'zh', 'en'] as const).map((language) => (
+          <label key={language}>
+            <input
+              type="radio"
+              name="language"
+              checked={settings.language === language}
+              onChange={() => void patch({ language })}
+            />
+            {language === 'system' ? text.languageSystem : language === 'zh' ? '简体中文' : 'English'}
+          </label>
+        ))}
       </section>
 
       <section>

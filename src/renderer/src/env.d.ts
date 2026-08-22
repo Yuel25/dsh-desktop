@@ -7,6 +7,7 @@ type DshSettings = {
   profile: string
   port: number
   startHidden: boolean
+  language: 'zh' | 'en' | 'system'
   openAtLogin: boolean
   profiles: string[]
   locale: 'zh' | 'en'
@@ -28,6 +29,7 @@ interface Window {
     onStatus(listener: (message: string) => void): () => void
     onGuidance(listener: (guidance: DshGuidance) => void): () => void
     getLocale(): Promise<'zh' | 'en'>
+    onLocaleChanged(listener: (locale: 'zh' | 'en') => void): () => void
     getOpenAtLogin(): Promise<boolean>
     setOpenAtLogin(enabled: boolean): Promise<boolean>
     openExternal(url: string): Promise<void>

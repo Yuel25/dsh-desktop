@@ -41,7 +41,8 @@ const DSH_DOCS_URL = 'https://github.com/deepseek-ai/deepseek-harness'
 
 type FrameColor = 'black' | 'white'
 type Locale = 'zh' | 'en'
-type AppSettings = { frameColor: FrameColor; profile: string; port: number; startHidden: boolean }
+type LanguageSetting = 'zh' | 'en' | 'system'
+type AppSettings = { frameColor: FrameColor; profile: string; port: number; startHidden: boolean; language: LanguageSetting }
 type GuidanceMode = 'dsh-missing' | 'start-failed'
 type Guidance = { mode: GuidanceMode; message: string } | null
 type UpdateResult = {
@@ -67,7 +68,11 @@ let rendererRecoveryAttempts = 0
 let rendererStableTimer: NodeJS.Timeout | null = null
 let latestAvailableVersion: string | null = null
 let cachedDshVersion: string | null = null
-let settings: AppSettings = { frameColor: 'black', profile: DEFAULT_PROFILE, port: DEFAULT_DSH_PORT, startHidden: false }
+let settings: AppSettings = { frameColor: 'black', profile: DEFAULT_PROFILE, port: DEFAULT_DSH_PORT, startHidden: false, language: 'system' }
+
+function effectiveLocale(): Locale {
+  return settings.language === 'zh' || settings.language === 'en' ? settings.language : systemLocale
+}
 
 type ExtraDshWindow = {
   profile: string
@@ -79,7 +84,8 @@ type ExtraDshWindow = {
 }
 const extraDshWindows: ExtraDshWindow[] = []
 
-const locale: Locale = app.getLocale().toLowerCase().startsWith('zh') ? 'zh' : 'en'
+const systemLocale: Locale = app.getLocale().toLowerCase().startsWith('zh') ? 'zh' : 'en'
+let activeLocale: Locale = systemLocale
 const launchHidden = process.argv.includes('--hidden') || process.argv.includes('/hidden')
 
 // ---------------------------------------------------------------------------
@@ -176,7 +182,7 @@ const messages = {  trayOpen: { zh: '打开 dsh-desktop', en: 'Open dsh-desktop'
 type MessageKey = keyof typeof messages
 
 function t(key: MessageKey, ...args: (string | number)[]): string {
-  let text: string = messages[key][locale]
+  let text: string = messages[key][activeLocale]
   args.forEach((arg, index) => {
     text = text.replaceAll(`{${index}}`, String(arg))
   })
@@ -310,7 +316,7 @@ function legacySetting<T>(fileName: string, key: string): T | null {
 }
 
 function loadSettings(): AppSettings {
-  const loaded: AppSettings = { frameColor: 'black', profile: DEFAULT_PROFILE, port: DEFAULT_DSH_PORT, startHidden: false }
+  const loaded: AppSettings = { frameColor: 'black', profile: DEFAULT_PROFILE, port: DEFAULT_DSH_PORT, startHidden: false, language: 'system' }
   let fromFile = false
   try {
     Object.assign(loaded, JSON.parse(readFileSync(settingsPath(), 'utf8')) as Partial<AppSettings>)
@@ -327,6 +333,7 @@ function loadSettings(): AppSettings {
   if (!loaded.profile) loaded.profile = DEFAULT_PROFILE
   if (!Number.isInteger(loaded.port) || loaded.port < 1 || loaded.port > 65535) loaded.port = DEFAULT_DSH_PORT
   if (typeof loaded.startHidden !== 'boolean') loaded.startHidden = false
+  if (loaded.language !== 'zh' && loaded.language !== 'en' && loaded.language !== 'system') loaded.language = 'system'
   return loaded
 }
 
@@ -1074,6 +1081,7 @@ async function attemptStartup(): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   settings = loadSettings()
+  activeLocale = effectiveLocale()
   const availableProfiles = listProfiles()
   if (availableProfiles.length > 0 && !availableProfiles.includes(settings.profile)) {
     settings.profile = DEFAULT_PROFILE
@@ -1110,6 +1118,7 @@ type SettingsSnapshot = {
   profile: string
   port: number
   startHidden: boolean
+  language: LanguageSetting
   openAtLogin: boolean
   profiles: string[]
   locale: Locale
@@ -1122,10 +1131,21 @@ function settingsSnapshot(): SettingsSnapshot {
     profile: settings.profile,
     port: settings.port,
     startHidden: settings.startHidden,
+    language: settings.language,
     openAtLogin: app.getLoginItemSettings().openAtLogin,
     profiles: listProfiles(),
-    locale,
+    locale: activeLocale,
     appVersion: app.getVersion(),
+  }
+}
+
+function applyLanguage(language: LanguageSetting): void {
+  settings.language = language
+  activeLocale = effectiveLocale()
+  saveSettings()
+  updateTrayMenu()
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('app:locale-changed', activeLocale)
   }
 }
 
@@ -1134,9 +1154,14 @@ ipcMain.handle('settings:get', (event) => {
   return settingsSnapshot()
 })
 
-ipcMain.handle('settings:set', (event, patch: Partial<Pick<AppSettings, 'frameColor' | 'profile' | 'port' | 'startHidden'>>) => {
-  if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
-  if (patch.frameColor === 'black' || patch.frameColor === 'white') setFrameColor(patch.frameColor)
+ipcMain.handle(
+  'settings:set',
+  (event, patch: Partial<Pick<AppSettings, 'frameColor' | 'profile' | 'port' | 'startHidden' | 'language'>>) => {
+    if (!isTrustedRenderer(event.sender)) throw new Error(t('errorUntrusted'))
+    if (patch.frameColor === 'black' || patch.frameColor === 'white') setFrameColor(patch.frameColor)
+    if (patch.language === 'zh' || patch.language === 'en' || patch.language === 'system') {
+      applyLanguage(patch.language)
+    }
   if (typeof patch.startHidden === 'boolean') {
     settings.startHidden = patch.startHidden
     saveSettings()
@@ -1170,7 +1195,7 @@ ipcMain.handle('app:get-icon-data-url', () => {
   return `data:image/png;base64,${icon.toString('base64')}`
 })
 
-ipcMain.handle('app:get-locale', () => locale)
+ipcMain.handle('app:get-locale', () => activeLocale)
 
 ipcMain.handle('appearance:get-frame-color', () => settings.frameColor)
 
@@ -1215,7 +1240,7 @@ ipcMain.handle('diag:collect', async (event) => {
     `electron: ${process.versions.electron}`,
     `node: ${process.versions.node}`,
     `platform: ${process.platform} ${process.arch}`,
-    `locale: ${locale}`,
+    `locale: ${activeLocale}`,
     `dsh: ${await dshVersion()}` || 'dsh: (not detected)',
     `profile: ${settings.profile}`,
     `port: ${settings.port}`,
