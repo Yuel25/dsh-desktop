@@ -74,14 +74,18 @@ The "New window" button next to each non-active profile starts a dedicated DSH i
 
 ## Settings and diagnostics
 
+Settings use a light sidebar layout with separate pages for each category, visual title bar previews, and save feedback. Navigation and content scroll independently in smaller windows.
+
 The tray menu keeps only high-frequency actions (open, open in browser, settings, restart, quit); everything else lives in the settings window:
 
 - **Appearance**: black or white title bar and the UI language, applied immediately.
 - **Startup**: launch at login (optionally hidden to the tray with DSH starting in the background) and the DSH port (applies after an app restart).
 - **Profile**: switch the main window's profile or open other profiles in new windows.
 - **Logs**: built-in viewer for dsh output, errors, the recovery log, and per-profile-window logs, plus a shortcut to the logs folder.
-- **Diagnostics**: one-click copy of the app version, dsh version, active profile, and more for issue reports.
+- **Diagnostics**: one-click copy of the app version, dsh version, active profile, active port, and configured port for issue reports.
 - **Update**: manual update check with a link to the releases page. An automatic check also runs at startup and notifies you when a new version is available.
+
+DSH output logs rotate during continuous writes at 5 MiB, keeping up to three backups per log. When the directory exceeds 50 MiB, old backups are pruned while active logs are preserved. Settings are written through a temporary file replacement; failed saves report an error, restore the previous in-memory configuration, and retain unsaved port input.
 
 ## Development
 

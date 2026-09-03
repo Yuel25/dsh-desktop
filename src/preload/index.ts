@@ -199,8 +199,15 @@ ipcRenderer.on('appearance:frame-color', (_event, color: FrameColor) => applyFra
 const localRendererOrigin = process.env.ELECTRON_RENDERER_URL
   ? new URL(process.env.ELECTRON_RENDERER_URL).origin
   : null
-const isLocalRenderer = location.protocol === 'file:' ||
-  (localRendererOrigin !== null && location.origin === localRendererOrigin)
+const normalizedPath = location.pathname.toLowerCase().replace(/\\/g, '/')
+const isLocalRenderer =
+  (location.protocol === 'file:' &&
+    (normalizedPath.endsWith('/index.html') || normalizedPath.endsWith('/settings.html'))) ||
+  (localRendererOrigin !== null &&
+    location.origin === localRendererOrigin &&
+    (normalizedPath === '/' ||
+      normalizedPath.endsWith('/index.html') ||
+      normalizedPath.endsWith('/settings.html')))
 
 if (isLocalRenderer) {
   contextBridge.exposeInMainWorld('dshDesktop', {

@@ -26,7 +26,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "check": "pnpm run typecheck && pnpm run build",
+    "test": "node --test test/security.test.mjs test/logging.test.mjs test/lifecycle.test.mjs test/config.test.mjs",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build",
     "preview": "electron-vite preview",
     "dist": "pnpm run build && electron-builder --win nsis"
   },
