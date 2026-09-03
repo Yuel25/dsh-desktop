@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import ts from 'typescript'
+import { transformSync } from 'esbuild'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../src/main')
 const nativeRequire = createRequire(import.meta.url)
@@ -15,9 +15,9 @@ export function loadMain(name, mocks = {}, globals = {}) {
     if (cache.has(filename)) return cache.get(filename).exports
     const module = { exports: {} }
     cache.set(filename, module)
-    const code = ts.transpileModule(readFileSync(filename, 'utf8'), {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-    }).outputText
+    const code = transformSync(readFileSync(filename, 'utf8'), {
+      loader: 'ts', format: 'cjs', target: 'es2022', sourcefile: filename,
+    }).code
     vm.runInNewContext(code, {
       module, exports: module.exports,
       require(specifier) {
