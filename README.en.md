@@ -109,6 +109,8 @@ Installer artifacts are written to `release/` and are not committed.
 
 The Electron main process owns the window, tray, and DSH child-process lifecycle. At startup it probes `127.0.0.1:3080`, identifies the profile of an existing healthy service from its command line and attaches to it (or starts `dsh --profile <name> --no-open` on Windows when the port is free). Once healthy, the window navigates from the local loading screen to the DSH Web UI.
 
+For DSH versions that require browser authentication, the desktop client reads the launch URL from its child process and authenticates automatically. Each profile window and restarted instance uses its own launch URL. HTTP 401/403/404 responses are not considered ready. If an externally started DSH requires authentication and the desktop session is not already authorized, stop that instance and retry so the desktop client can launch the service.
+
 ## Security
 
 - DSH binds to `127.0.0.1` by default.

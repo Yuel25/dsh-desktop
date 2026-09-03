@@ -1,3 +1,16 @@
+# dsh-desktop v1.2.1
+
+- 修复新版 DSH 启用浏览器认证后桌面界面无法加载的问题，自动读取并使用当前实例的启动认证链接。
+- 主窗口、独立 profile 窗口及自动恢复均使用对应实例的链接；停止主实例时清除旧链接。
+- HTTP 401/403/404 不再视为就绪；未认证的外部实例显示处理提示，已认证的桌面会话可继续连接。
+- 验证：类型检查、24 项自动化测试，以及使用真实 DSH 的 Electron 认证与页面加载测试。
+
+English:
+- Fix blank desktop pages with authenticated DSH versions by consuming each instance's launch URL.
+- Support authentication for the main window, profile windows, and recovered processes; clear the primary launch URL when its instance is stopped.
+- Reject HTTP 401/403/404 as readiness signals. Show actionable guidance for unauthorized external instances and reuse existing authorized desktop sessions.
+- Validated with type checks, 24 automated tests, and a real DSH/Electron authentication and UI smoke test. The Windows installer upgrade was also verified locally.
+
 # dsh-desktop v1.2.0
 
 ## 中文

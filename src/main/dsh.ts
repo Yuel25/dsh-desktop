@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import { getSettings, saveSettings } from './config.js'
 import { t } from './i18n.js'
 import { createRotatingLogStream, safeCloseStream, writeRecoveryLog } from './logging.js'
+import { createDshLaunchReader, redactDshToken } from './dsh-auth.js'
 import {
   createCancellationToken,
   DEFAULT_DSH_PORT,
@@ -45,6 +46,7 @@ let recoveringDsh = false
 let switchingProfile = false
 let startingPrimary = false
 let cachedDshVersion: string | null = null
+let primaryLaunchUrl: string | null = null
 
 const extraDshWindows: ExtraDshWindow[] = []
 const openingProfiles = new Map<string, Promise<void>>()
@@ -68,11 +70,12 @@ export function getActiveDshPort(): number {
 }
 
 export function setActiveDshPort(port: number): void {
+  if (port !== activeDshPort) primaryLaunchUrl = null
   activeDshPort = port
 }
 
 export function primaryDshUrl(): string {
-  return `http://${DSH_HOST}:${activeDshPort}`
+  return primaryLaunchUrl ?? `http://${DSH_HOST}:${activeDshPort}`
 }
 
 export function isDshReadyState(): boolean {
@@ -101,18 +104,25 @@ export function canConnect(port: number): Promise<boolean> {
   })
 }
 
-export function isDshReady(url: string): Promise<boolean> {
+function dshHttpStatus(url: string): Promise<number> {
   return new Promise((resolve) => {
     const request = get(url, { timeout: 1_000 }, (response) => {
       response.resume()
-      resolve((response.statusCode ?? 500) < 500)
+      const status = response.statusCode ?? 500
+      // Only the documented same-origin launch-token exchange is a ready redirect.
+      resolve(status === 303 && (response.headers.location !== '/' || !new URL(url).searchParams.has('token')) ? 500 : status)
     })
-    request.on('error', () => resolve(false))
+    request.on('error', () => resolve(0))
     request.on('timeout', () => {
       request.destroy()
-      resolve(false)
+      resolve(0)
     })
   })
+}
+
+export async function isDshReady(url: string): Promise<boolean> {
+  const status = await dshHttpStatus(url)
+  return (status >= 200 && status < 300) || status === 303
 }
 
 export function freePort(): Promise<number> {
@@ -259,7 +269,7 @@ export async function dshVersion(): Promise<string> {
 }
 
 async function waitUntilReady(
-  url: string,
+  getUrl: () => string,
   timeoutMs: number,
   child: ChildProcess | null,
   cancelToken?: CancellationToken,
@@ -269,7 +279,7 @@ async function waitUntilReady(
     if (cancelToken?.isCancelled || quitting) {
       throw new DshError('generic', t('errorCancelled'))
     }
-    if (await isDshReady(url)) return
+    if (await isDshReady(getUrl())) return
     if (dshStartupError) throw dshStartupError
     if (child && child.exitCode !== null) {
       throw new DshError('exited-early', t('errorExitedEarly', child.exitCode ?? '?'), child.exitCode)
@@ -281,7 +291,7 @@ async function waitUntilReady(
 
 export async function startDsh(cancelToken?: CancellationToken): Promise<'attached' | 'started'> {
   dshStartupError = null
-  const url = primaryDshUrl()
+  const url = `http://${DSH_HOST}:${activeDshPort}`
   const settings = getSettings()
   const mainWindow = getMainWindow()
 
@@ -304,7 +314,18 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
     sendStatus(
       runningProfile ? t('statusConnectingExisting', runningProfile) : t('statusConnectingUnknown'),
     )
-    await waitUntilReady(url, 15_000, null, cancelToken)
+    if (await dshHttpStatus(url) === 401) {
+      // Reuse a browser session previously authorized by this desktop client.
+      const authorized = mainWindow && !mainWindow.isDestroyed()
+        ? await mainWindow.webContents.session.fetch(url, {
+          method: 'HEAD', redirect: 'error', signal: AbortSignal.timeout(5000),
+        }).then(response => response.ok).catch(() => false)
+        : false
+      if (!authorized) throw new DshError('generic', t('errorExternalAuth', activeDshPort))
+      primaryLaunchUrl = null
+    } else {
+      await waitUntilReady(() => url, 15_000, null, cancelToken)
+    }
     return 'attached'
   }
 
@@ -322,6 +343,7 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
   stderr.on('error', (err: Error) => writeRecoveryLog(`Primary DSH stderr stream error: ${err.message}`))
 
   dshStartupError = null
+  primaryLaunchUrl = null
   const child = spawn(plan.command, plan.args, {
     env: process.env,
     shell: false,
@@ -329,6 +351,10 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   dshProcess = child
+
+  child.stdout?.on('data', createDshLaunchReader(activeDshPort, (launchUrl) => {
+    if (dshProcess === child) primaryLaunchUrl = launchUrl
+  }))
 
   child.stdout?.pipe(stdout)
   child.stderr?.pipe(stderr)
@@ -358,7 +384,7 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
   })
 
   try {
-    await waitUntilReady(url, 60_000, child, cancelToken)
+    await waitUntilReady(primaryDshUrl, 60_000, child, cancelToken)
     if (cancelToken?.isCancelled || quitting) throw new DshError('generic', t('errorCancelled'))
     dshReady = true
     return 'started'
@@ -379,6 +405,7 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
 
 export async function stopOwnedDsh(): Promise<void> {
   dshReady = false
+  primaryLaunchUrl = null
   const pid = dshProcess?.pid
   dshProcess = null
   await killProcessTree(pid)
@@ -508,7 +535,7 @@ export async function attemptStartup(): Promise<void> {
     sendStatus(t('statusReady'))
     if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(primaryDshUrl())
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = redactDshToken(error instanceof Error ? error.message : String(error))
     writeRecoveryLog(`Startup failed: ${message}`)
     const isMissing = error instanceof DshError ? error.kind === 'not-installed' : looksLikeDshMissing(message)
     const mode: GuidanceMode = isMissing ? 'dsh-missing' : 'start-failed'
@@ -536,6 +563,7 @@ export function spawnExtraProcess(entry: ExtraDshWindow, plan: { command: string
 
   entry.startupError = null
   entry.ready = false
+  entry.url = `http://${DSH_HOST}:${entry.port}`
   const child = spawn(plan.command, plan.args, {
     env: process.env,
     shell: false,
@@ -543,6 +571,10 @@ export function spawnExtraProcess(entry: ExtraDshWindow, plan: { command: string
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   entry.process = child
+
+  child.stdout?.on('data', createDshLaunchReader(entry.port, (launchUrl) => {
+    if (entry.process === child) entry.url = launchUrl
+  }))
 
   child.stdout?.pipe(stdout)
   child.stderr?.pipe(stderr)
@@ -646,11 +678,11 @@ export async function openProfileWindow(profile: string): Promise<void> {
         throw new DshError('not-installed', plan.reason)
       }
       spawnExtraProcess(entry, plan)
-      await waitUntilReadyFor(url, 60_000, entry, cancelSource.token)
+      await waitUntilReadyFor(60_000, entry, cancelSource.token)
       assertExtraActive(entry, cancelSource.token)
       entry.ready = true
       sendStatusTo(window, t('statusReadyProfile', profile))
-      await window.loadURL(url)
+      await window.loadURL(entry.url)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       writeRecoveryLog(`Opening profile window "${profile}" failed: ${message}`)
@@ -683,7 +715,7 @@ export async function recoverProfileWindow(entry: ExtraDshWindow): Promise<void>
       throw new DshError('not-installed', plan.reason)
     }
     spawnExtraProcess(entry, plan)
-    await waitUntilReadyFor(entry.url, 60_000, entry)
+    await waitUntilReadyFor(60_000, entry)
     assertExtraActive(entry)
     await window.loadURL(entry.url)
     entry.ready = true
@@ -723,7 +755,6 @@ async function stopExtraProcess(entry: ExtraDshWindow): Promise<void> {
 }
 
 async function waitUntilReadyFor(
-  url: string,
   timeoutMs: number,
   entry: ExtraDshWindow,
   cancelToken?: CancellationToken,
@@ -733,7 +764,7 @@ async function waitUntilReadyFor(
     if (cancelToken?.isCancelled || quitting || entry.window.isDestroyed()) {
       throw new DshError('generic', t('errorCancelled'))
     }
-    if (await isDshReady(url)) return
+    if (await isDshReady(entry.url)) return
     if (entry.startupError) throw entry.startupError
     if (entry.process && entry.process.exitCode !== null) {
       throw new DshError('exited-early', t('errorExitedEarly', entry.process.exitCode ?? '?'), entry.process.exitCode)

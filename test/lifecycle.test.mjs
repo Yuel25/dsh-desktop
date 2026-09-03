@@ -5,7 +5,7 @@ import { PassThrough, Writable } from 'node:stream'
 import { loadMain } from './load-main.mjs'
 const tick = () => new Promise(resolve => setImmediate(resolve))
 function fixture(options = {}) {
-  const children = [], killed = [], windows = [], events = [], lookupCallbacks = []
+  const children = [], killed = [], windows = [], events = [], lookupCallbacks = [], loadedUrls = []
   const settings = { profile: 'web', port: 3080 }
   let port = 40000, now = 0
   function window() {
@@ -14,7 +14,8 @@ function fixture(options = {}) {
     Object.assign(w, {
       isDestroyed: () => destroyed, show() {}, focus() {},
       destroy() { if (!destroyed) { destroyed = true; w.emit('closed') } },
-      loadURL: async () => {},
+      loadURL: async url => { loadedUrls.push(url) },
+      webContents: { session: { fetch: async () => ({ ok: options.authorizedSession ?? false }) } },
     })
     windows.push(w)
     return w
@@ -45,6 +46,7 @@ function fixture(options = {}) {
         const child = new EventEmitter()
         Object.assign(child, { pid: 100 + children.length, exitCode: null, stdout: new PassThrough(), stderr: new PassThrough() })
         children.push(child); events.push('spawn')
+        if (options.output) queueMicrotask(() => options.output(child, children.length))
         if (options.spawnError && children.length === 1) queueMicrotask(() => child.emit('error', Error('ENOENT')))
         return child
       },
@@ -52,9 +54,10 @@ function fixture(options = {}) {
     'node:net': { createServer() {
       return { unref() {}, on() {}, listen(_port, _host, cb) { setImmediate(cb) }, address: () => ({ port: port++ }), close: cb => cb() }
     } },
-    'node:http': { get(_url, _options, cb) {
+    'node:http': { get(url, _options, cb) {
       const req = new EventEmitter(); req.destroy = () => {}
       setImmediate(() => {
+        if (options.http) { const reply = options.http(url, children.length); if (reply) cb({ headers: {}, resume() {}, ...reply }); else req.emit('error', Error('offline')); return }
         if (options.holdHttp && children.length) { options.holdHttp(() => cb({ statusCode: 200, resume() {} })); return }
         const ready = options.ready ? options.ready(children.length) : true
         if (ready) cb({ statusCode: 200, resume() {} }); else req.emit('error', Error('offline'))
@@ -65,7 +68,7 @@ function fixture(options = {}) {
     setTimeout: cb => setImmediate(cb),
     Date: { now: () => (now += options.timeout ? 20000 : 1) },
   })
-  return { dsh, children, killed, windows, window, events, settings, lookupCallbacks }
+  return { dsh, children, killed, windows, window, events, settings, lookupCallbacks, loadedUrls }
 }
 function entry(f) {
   return { window: f.window(), profile: 'coding', port: 40000, url: 'http://127.0.0.1:40000', process: null, recoveryAttempts: 0, startupError: null }
@@ -152,4 +155,57 @@ test('shutdown waits for process cleanup of an already detached window', async (
   await closing
   assert.equal(finished, true)
   assert.deepEqual(f.killed, [100])
+})
+
+test('primary startup uses the split launch token and clears it after stopping', async () => {
+  const f = fixture({
+    output(child, count) {
+      child.stdout.write('dsh web: http://127.0.0.1:3080/?tok')
+      child.stdout.write(`en=launch-${count}\r\n`)
+    },
+    http(url, count) {
+      if (url.includes(`token=launch-${count}`)) return { statusCode: 303, headers: { location: '/' } }
+      return count ? { statusCode: 401 } : null
+    },
+  })
+  await f.dsh.attemptStartup()
+  assert.deepEqual(f.loadedUrls, ['http://127.0.0.1:3080/?token=launch-1'])
+  await f.dsh.stopOwnedDsh()
+  // A stopped instance must not leave its token on future URLs.
+  assert.equal(f.dsh.primaryDshUrl(), 'http://127.0.0.1:3080')
+  f.children[0].stdout.write('dsh web: http://127.0.0.1:3080/?token=stale\n')
+  assert.equal(f.dsh.primaryDshUrl(), 'http://127.0.0.1:3080')
+})
+
+test('extra windows load their own token, including after process recovery', async () => {
+  const f = fixture({
+    output(child, count) { child.stdout.write(`dsh web: http://127.0.0.1:40000/?token=extra-${count}\n`) },
+    http(url, count) { return url.includes(`token=extra-${count}`) ? { statusCode: 303, headers: { location: '/' } } : { statusCode: 401 } },
+  })
+  await f.dsh.openProfileWindow('coding')
+  const e = f.dsh.getExtraDshWindows()[0]
+  e.process = null // Simulate the exit handler before recovery.
+  await f.dsh.recoverProfileWindow(e)
+  assert.deepEqual(f.loadedUrls, ['http://127.0.0.1:40000/?token=extra-1', 'http://127.0.0.1:40000/?token=extra-2'])
+  await f.dsh.closeAllProfileWindows()
+})
+
+test('401 external service gives actionable guidance without killing it or loading an error page', async () => {
+  const f = fixture({ http: () => ({ statusCode: 401 }) })
+  await assert.rejects(f.dsh.startDsh(), /errorExternalAuth/)
+  assert.equal(f.killed.length, 0)
+  assert.equal(f.loadedUrls.length, 0)
+})
+
+test('external service reuses an already authenticated desktop session', async () => {
+  const f = fixture({ http: () => ({ statusCode: 401 }), authorizedSession: true })
+  assert.equal(await f.dsh.startDsh(), 'attached')
+  assert.equal(f.children.length, 0)
+})
+
+test('HTTP errors and unrelated redirects do not count as ready', async () => {
+  for (const statusCode of [401, 403, 404, 500, 302, 303]) {
+    const f = fixture({ http: () => ({ statusCode, headers: { location: 'https://example.com/' } }) })
+    assert.equal(await f.dsh.isDshReady('http://127.0.0.1:3080/?token=test'), false)
+  }
 })

@@ -40,6 +40,10 @@ export const messages = {
     en: 'Cancelled connecting to the existing DSH with profile "{0}".',
   },
   errorCancelled: { zh: '操作已取消。', en: 'Operation cancelled.' },
+  errorExternalAuth: {
+    zh: '端口 {0} 上的 DSH 需要浏览器认证。请先关闭外部启动的 DSH，再点击重试，由桌面客户端启动并自动认证。',
+    en: 'DSH on port {0} requires browser authentication. Stop the externally started DSH, then retry so the desktop client can start and authenticate it.',
+  },
   errorExternalHttp: { zh: '仅允许打开 http/https 链接。', en: 'Only http/https URLs can be opened.' },
   dialogProfileMismatchTitle: { zh: 'profile 不一致', en: 'Profile mismatch' },
   dialogProfileMismatchMessage: {
