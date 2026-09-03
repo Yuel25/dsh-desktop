@@ -1,3 +1,19 @@
+# dsh-desktop v1.2.3
+
+## 中文
+
+- 新增 GitHub 自动发布流程：推送稳定版本标签后，自动检查、构建并发布 Windows x64 安装包。
+- 发布附带对应版本的更新说明、安装包 blockmap 和 SHA256 校验文件。
+- 支持手动补发已有版本标签，保护已发布的正式 Release 不被覆盖。
+- 包含 v1.2.2 的鲸鱼娘图标与中英文 README 更新。
+
+## English
+
+- Add automatic GitHub Releases for stable version tags, with checks and Windows x64 installer builds.
+- Include version-specific release notes, installer blockmaps, and SHA256 checksums.
+- Support manual publishing of existing tags without overwriting published releases.
+- Include the whale-girl icon and bilingual README updates from v1.2.2.
+
 # dsh-desktop v1.2.2
 
 ## 中文

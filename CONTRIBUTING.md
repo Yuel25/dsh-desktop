@@ -44,6 +44,26 @@ pnpm run check
 - Treat process ownership explicitly: never terminate a DSH process that dsh-desktop did not start.
 - Do not commit API keys, credentials, `.env` files, DSH profiles, or session data.
 
+## Releases
+
+The `Release` GitHub Actions workflow builds and publishes Windows x64 installers
+when a stable version tag (`vMAJOR.MINOR.PATCH`) is pushed.
+
+1. Update `package.json` and add a matching `# dsh-desktop vMAJOR.MINOR.PATCH`
+   section to `RELEASE_NOTES.md`.
+2. Commit the changes, create the matching tag, and push the commit and tag.
+3. The workflow checks types, runs tests, builds the application, and packages NSIS.
+   It uploads the installer, blockmap, optional `latest.yml`, and `SHA256SUMS.txt`
+   to a draft, then publishes it only after every upload succeeds.
+
+Use **Actions → Release → Run workflow** on the default branch and supply an
+existing tag to publish older versions (including tags created before this workflow).
+The build always checks out the exact tag, not the current main branch.
+Published releases are never overwritten; failed draft uploads can be retried.
+Only stable tags are supported. No personal token is needed: publishing uses the
+repository's automatic `GITHUB_TOKEN` with `contents: write`. Installers are not
+code-signed; Windows may display an unknown-publisher warning.
+
 ## License
 
 By contributing code, you agree that your contribution is licensed under the repository's MIT License. Do not add third-party brand assets or code without documenting their source and license.
