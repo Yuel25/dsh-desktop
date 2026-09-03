@@ -1,3 +1,17 @@
+# dsh-desktop v1.2.2
+
+## 中文
+
+- 更换为全新的蓝色鲸鱼娘应用图标，统一窗口、托盘、通知、启动加载页、设置页及安装包的图标资源。
+- 中英文 README 同步展示新图标。
+- 验证：类型检查、24 项自动化测试和生产构建通过。
+
+## English
+
+- Introduce a blue whale-girl application icon shared by windows, the tray, notifications, startup and settings pages, and installer builds.
+- Update the icon displayed in both Chinese and English READMEs.
+- Validated with type checks, 24 automated tests, and a production build.
+
 # dsh-desktop v1.2.1
 
 - 修复新版 DSH 启用浏览器认证后桌面界面无法加载的问题，自动读取并使用当前实例的启动认证链接。

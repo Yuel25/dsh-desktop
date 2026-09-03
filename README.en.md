@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" width="112" alt="dsh-desktop whale icon">
+  <img src="assets/icon.png" width="112" height="112" alt="dsh-desktop whale-girl icon">
 </p>
 
 <h1 align="center">dsh-desktop</h1>
