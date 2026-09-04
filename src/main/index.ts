@@ -22,11 +22,12 @@ import {
   switchProfile,
 } from './dsh.js'
 import { getActiveLocale, setActiveLocale, t } from './i18n.js'
-import { listAvailableLogFiles, readLogTail } from './logging.js'
+import { isAllowedLogFilename, listAvailableLogFiles, readLogTail } from './logging.js'
 import { isTrustedRenderer, safeOpenExternal, setAppQuitting } from './security.js'
 import { createTray, updateTrayMenu } from './tray.js'
 import {
   DEFAULT_PROFILE,
+  isValidProfileName,
   type AppSettings,
   type ExtraDshWindow,
   type FrameColor,
@@ -39,6 +40,7 @@ import {
   createMainWindow,
   getMainWindow,
   getSettingsWindow,
+  getWindowLaunchState,
   loadLocalPage,
   setWindowsQuitting,
 } from './windows.js'
@@ -113,7 +115,7 @@ async function bootstrap(): Promise<void> {
   setActiveLocale(effectiveLocale(settings.language))
 
   const availableProfiles = listProfiles()
-  if (availableProfiles.length > 0 && !availableProfiles.includes(settings.profile)) {
+  if (!isValidProfileName(settings.profile) || (availableProfiles.length > 0 && !availableProfiles.includes(settings.profile))) {
     settings.profile = DEFAULT_PROFILE
     saveSettings()
   }
@@ -203,8 +205,13 @@ ipcMain.handle(
       settings.port = patch.port
       saveSettings()
     }
-    if (typeof patch.profile === 'string' && patch.profile && patch.profile !== settings.profile) {
-      await switchProfile(patch.profile)
+    if (patch.profile !== undefined) {
+      if (!isValidProfileName(patch.profile)) {
+        throw new Error(t('errorInvalidProfile', String(patch.profile)))
+      }
+      if (patch.profile !== settings.profile) {
+        await switchProfile(patch.profile)
+      }
     }
     return settingsSnapshot()
   },
@@ -253,15 +260,31 @@ ipcMain.handle('startup:retry', (event) => {
   void attemptStartup()
 })
 
+ipcMain.handle('startup:get-state', (event) => {
+  if (!isTrustedRenderer(event.senderFrame ?? event.sender)) throw new Error(t('errorUntrusted'))
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (!window) return { status: null, guidance: null, version: 0 }
+  return getWindowLaunchState(window)
+})
+
 ipcMain.handle('profile:open-window', async (event, profile: string) => {
   if (!isTrustedRenderer(event.senderFrame ?? event.sender)) throw new Error(t('errorUntrusted'))
-  if (typeof profile === 'string' && profile) await openProfileWindow(profile)
+  if (!isValidProfileName(profile)) {
+    throw new Error(t('errorInvalidProfile', String(profile)))
+  }
+  await openProfileWindow(profile)
+})
+
+ipcMain.handle('logs:list', (event) => {
+  if (!isTrustedRenderer(event.senderFrame ?? event.sender)) throw new Error(t('errorUntrusted'))
+  return listAvailableLogFiles()
 })
 
 ipcMain.handle('logs:read', (event, name: string) => {
   if (!isTrustedRenderer(event.senderFrame ?? event.sender)) throw new Error(t('errorUntrusted'))
-  const allowed = listAvailableLogFiles()
-  if (typeof name !== 'string' || !allowed.includes(name)) throw new Error('Unknown log file.')
+  if (typeof name !== 'string' || !isAllowedLogFilename(name)) {
+    throw new Error('Unknown log file.')
+  }
   return readLogTail(name)
 })
 

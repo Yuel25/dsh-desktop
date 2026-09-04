@@ -15,7 +15,9 @@ import {
   DEFAULT_PROFILE,
   DSH_HOST,
   DshError,
+  isValidProfileName,
   MAX_RECOVERY_ATTEMPTS,
+  STABLE_RUNNING_WINDOW_MS,
   type CancellationToken,
   type ExtraDshWindow,
   type Guidance,
@@ -27,6 +29,7 @@ import {
   getMainWindow,
   loadLocalPage,
   sendGuidance,
+  sendGuidanceTo,
   sendStatus,
   sendStatusTo,
 } from './windows.js'
@@ -47,6 +50,44 @@ let switchingProfile = false
 let startingPrimary = false
 let cachedDshVersion: string | null = null
 let primaryLaunchUrl: string | null = null
+let primaryRecoveryAttempts = 0
+let primaryStableTimer: NodeJS.Timeout | null = null
+
+function clearPrimaryStableTimer(): void {
+  if (primaryStableTimer) {
+    clearTimeout(primaryStableTimer)
+    primaryStableTimer = null
+  }
+}
+
+export function getPrimaryRecoveryAttempts(): number {
+  return primaryRecoveryAttempts
+}
+
+function schedulePrimaryStabilityReset(child: ChildProcess): void {
+  clearPrimaryStableTimer()
+  primaryStableTimer = setTimeout(() => {
+    if (dshProcess === child && dshReady) {
+      primaryRecoveryAttempts = 0
+    }
+  }, STABLE_RUNNING_WINDOW_MS)
+}
+
+function clearExtraStableTimer(entry: ExtraDshWindow): void {
+  if (entry.stableTimer) {
+    clearTimeout(entry.stableTimer)
+    entry.stableTimer = null
+  }
+}
+
+function scheduleExtraStabilityReset(entry: ExtraDshWindow, child: ChildProcess): void {
+  clearExtraStableTimer(entry)
+  entry.stableTimer = setTimeout(() => {
+    if (entry.process === child && entry.ready && !entry.window.isDestroyed()) {
+      entry.recoveryAttempts = 0
+    }
+  }, STABLE_RUNNING_WINDOW_MS)
+}
 
 const extraDshWindows: ExtraDshWindow[] = []
 const openingProfiles = new Map<string, Promise<void>>()
@@ -157,10 +198,13 @@ function dshArgsFor(profile: string, port: number): string[] {
 }
 
 export type DshLaunchPlan =
-  | { available: true; command: string; args: string[] }
+  | { available: true; command: string; args: string[]; windowsVerbatimArguments?: boolean }
   | { available: false; reason: string }
 
 export async function resolveDshLaunch(profile: string, port: number): Promise<DshLaunchPlan> {
+  if (!isValidProfileName(profile)) {
+    throw new DshError('generic', t('errorInvalidProfile', String(profile)))
+  }
   const dshArgs = dshArgsFor(profile, port)
   const powershellLauncher = process.env.APPDATA ? join(process.env.APPDATA, 'npm', 'dsh.ps1') : null
   if (powershellLauncher && existsSync(powershellLauncher)) {
@@ -186,18 +230,63 @@ export async function resolveDshLaunch(profile: string, port: number): Promise<D
     return {
       available: true,
       command: process.env.ComSpec || 'cmd.exe',
-      args: ['/d', '/c', `"${cmdLauncher}" ${quoted.join(' ')}`],
+      args: ['/d', '/v:off', '/s', '/c', `""${cmdLauncher}" ${quoted.join(' ')}"`],
+      // The outer quotes belong to cmd /s /c; preserve them without Node escaping.
+      windowsVerbatimArguments: true,
     }
   }
 
   try {
     const { stdout } = await execFileAsync('where.exe', ['dsh'], { windowsHide: true, timeout: 5_000 })
-    if (stdout.trim().length > 0) {
+    const candidates = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+
+    for (const candidate of candidates) {
+      const lower = candidate.toLowerCase()
+      if (lower.endsWith('.ps1')) {
+        return {
+          available: true,
+          command: 'powershell.exe',
+          args: [
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            candidate,
+            ...dshArgs,
+          ],
+        }
+      }
+      if (lower.endsWith('.exe')) {
+        return {
+          available: true,
+          command: candidate,
+          args: dshArgs,
+        }
+      }
+      if (lower.endsWith('.cmd') || lower.endsWith('.bat')) {
+        const quoted = dshArgs.map(quoteCmdArgument)
+        return {
+          available: true,
+          command: process.env.ComSpec || 'cmd.exe',
+          args: ['/d', '/v:off', '/s', '/c', `""${candidate}" ${quoted.join(' ')}"`],
+          windowsVerbatimArguments: true,
+        }
+      }
+    }
+
+    if (candidates.length > 0) {
+      const target = candidates[0]
       const quoted = dshArgs.map(quoteCmdArgument)
       return {
         available: true,
         command: process.env.ComSpec || 'cmd.exe',
-        args: ['/d', '/c', `dsh ${quoted.join(' ')}`],
+        args: ['/d', '/v:off', '/s', '/c', `""${target}" ${quoted.join(' ')}"`],
+        windowsVerbatimArguments: true,
       }
     }
   } catch {
@@ -347,6 +436,7 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
   const child = spawn(plan.command, plan.args, {
     env: process.env,
     shell: false,
+    windowsVerbatimArguments: plan.windowsVerbatimArguments,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -372,6 +462,7 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
   child.once('exit', (code) => {
     safeCloseStream(stdout)
     safeCloseStream(stderr)
+    clearPrimaryStableTimer()
     const shouldRecover = dshReady && !quitting && dshProcess === child
     if (dshProcess === child) {
       dshProcess = null
@@ -380,7 +471,24 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
     if (shouldRecover && code !== 0 && !dshStartupError) {
       dshStartupError = new DshError('exited-early', t('errorExitedEarly', code ?? 'unknown'), code)
     }
-    if (shouldRecover) void recoverDsh()
+    if (shouldRecover) {
+      primaryRecoveryAttempts += 1
+      if (primaryRecoveryAttempts <= MAX_RECOVERY_ATTEMPTS) {
+        writeRecoveryLog(`Primary DSH exited unexpectedly; recovery attempt ${primaryRecoveryAttempts}.`)
+        void recoverDsh()
+      } else {
+        const mainWindow = getMainWindow()
+        writeRecoveryLog(`Primary DSH reached max recovery attempts (${MAX_RECOVERY_ATTEMPTS}).`)
+        if (!quitting && mainWindow && !mainWindow.isDestroyed()) {
+          void dialog.showMessageBox(mainWindow, {
+            type: 'error',
+            title: t('dialogRecoveryFailedTitle'),
+            message: t('dialogRecoveryFailedMessage', MAX_RECOVERY_ATTEMPTS),
+            detail: t('dialogLogsDetail', app.getPath('logs')),
+          })
+        }
+      }
+    }
   })
 
   try {
@@ -404,6 +512,8 @@ export async function startDsh(cancelToken?: CancellationToken): Promise<'attach
 }
 
 export async function stopOwnedDsh(): Promise<void> {
+  clearPrimaryStableTimer()
+  primaryRecoveryAttempts = 0
   dshReady = false
   primaryLaunchUrl = null
   const pid = dshProcess?.pid
@@ -417,19 +527,26 @@ export async function recoverDsh(): Promise<void> {
   recoveringDsh = true
   try {
     await loadLocalPage(mainWindow, 'index.html')
-    for (let attempt = 1; attempt <= MAX_RECOVERY_ATTEMPTS && !quitting; attempt += 1) {
-      sendStatus(t('statusRecovering', attempt, MAX_RECOVERY_ATTEMPTS))
-      await delay(attempt * 1_000)
+    primaryRecoveryAttempts = Math.max(1, primaryRecoveryAttempts)
+    while (!quitting && primaryRecoveryAttempts <= MAX_RECOVERY_ATTEMPTS) {
+      sendStatus(t('statusRecovering', primaryRecoveryAttempts, MAX_RECOVERY_ATTEMPTS))
+      await delay(primaryRecoveryAttempts * 1_000)
+      if (quitting) return
       try {
         await startDsh()
         if (!mainWindow || mainWindow.isDestroyed()) return
         sendStatus(t('statusReady'))
         await mainWindow.loadURL(primaryDshUrl())
         notify(t('notifyRecoveredTitle'), t('statusReady'))
+        if (dshProcess) schedulePrimaryStabilityReset(dshProcess)
         return
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        writeRecoveryLog(`DSH recovery attempt ${attempt} failed: ${message}`)
+        writeRecoveryLog(`DSH recovery attempt ${primaryRecoveryAttempts} failed: ${message}`)
+        // startDsh cleans up failed launches; also clean up a failed page load.
+        const attempts = primaryRecoveryAttempts
+        await stopOwnedDsh()
+        primaryRecoveryAttempts = attempts + 1
       }
     }
     if (!quitting && mainWindow && !mainWindow.isDestroyed()) {
@@ -446,6 +563,9 @@ export async function recoverDsh(): Promise<void> {
 }
 
 export async function switchProfile(name: string): Promise<void> {
+  if (!isValidProfileName(name)) {
+    throw new DshError('generic', t('errorInvalidProfile', String(name)))
+  }
   const settings = getSettings()
   const mainWindow = getMainWindow()
   if (name === settings.profile || quitting || recoveringDsh || switchingProfile || startingPrimary) return
@@ -481,6 +601,7 @@ export async function switchProfile(name: string): Promise<void> {
       await startDsh()
       dshReady = true
       sendStatus(t('statusReadyProfile', name))
+      if (dshProcess) schedulePrimaryStabilityReset(dshProcess)
       if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(primaryDshUrl())
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -496,6 +617,7 @@ export async function switchProfile(name: string): Promise<void> {
         await startDsh()
         dshReady = true
         restored = true
+        if (dshProcess) schedulePrimaryStabilityReset(dshProcess)
       } catch (restoreError) {
         const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError)
         writeRecoveryLog(`Restoring profile "${previousProfile}" failed: ${restoreMessage}`)
@@ -533,6 +655,7 @@ export async function attemptStartup(): Promise<void> {
     await startDsh()
     dshReady = true
     sendStatus(t('statusReady'))
+    if (dshProcess) schedulePrimaryStabilityReset(dshProcess)
     if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(primaryDshUrl())
   } catch (error) {
     const message = redactDshToken(error instanceof Error ? error.message : String(error))
@@ -547,7 +670,7 @@ export async function attemptStartup(): Promise<void> {
   }
 }
 
-export function spawnExtraProcess(entry: ExtraDshWindow, plan: { command: string; args: string[] }): void {
+export function spawnExtraProcess(entry: ExtraDshWindow, plan: { command: string; args: string[]; windowsVerbatimArguments?: boolean }): void {
   assertExtraActive(entry)
   const { profile } = entry
   safeCloseStream(entry.stdoutStream)
@@ -567,6 +690,7 @@ export function spawnExtraProcess(entry: ExtraDshWindow, plan: { command: string
   const child = spawn(plan.command, plan.args, {
     env: process.env,
     shell: false,
+    windowsVerbatimArguments: plan.windowsVerbatimArguments,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -592,6 +716,7 @@ export function spawnExtraProcess(entry: ExtraDshWindow, plan: { command: string
   child.once('exit', (code) => {
     safeCloseStream(stdout)
     safeCloseStream(stderr)
+    clearExtraStableTimer(entry)
     if (quitting || entry.window.isDestroyed() || entry.process !== child) return
     const shouldRecover = entry.ready
     entry.ready = false
@@ -612,6 +737,9 @@ export function spawnExtraProcess(entry: ExtraDshWindow, plan: { command: string
 }
 
 export async function openProfileWindow(profile: string): Promise<void> {
+  if (!isValidProfileName(profile)) {
+    throw new DshError('generic', t('errorInvalidProfile', String(profile)))
+  }
   if (quitting) throw new DshError('generic', t('errorCancelled'))
   const settings = getSettings()
   const mainWindow = getMainWindow()
@@ -682,6 +810,7 @@ export async function openProfileWindow(profile: string): Promise<void> {
       assertExtraActive(entry, cancelSource.token)
       entry.ready = true
       sendStatusTo(window, t('statusReadyProfile', profile))
+      if (entry.process) scheduleExtraStabilityReset(entry, entry.process)
       await window.loadURL(entry.url)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -719,7 +848,7 @@ export async function recoverProfileWindow(entry: ExtraDshWindow): Promise<void>
     assertExtraActive(entry)
     await window.loadURL(entry.url)
     entry.ready = true
-    entry.recoveryAttempts = 0
+    if (entry.process) scheduleExtraStabilityReset(entry, entry.process)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     writeRecoveryLog(`Recovering profile window "${profile}" failed: ${message}`)
@@ -737,6 +866,8 @@ function assertExtraActive(entry: ExtraDshWindow, token?: CancellationToken): vo
 }
 
 async function stopExtraProcess(entry: ExtraDshWindow): Promise<void> {
+  clearExtraStableTimer(entry)
+  entry.recoveryAttempts = 0
   const child = entry.process
   entry.process = null
   entry.ready = false

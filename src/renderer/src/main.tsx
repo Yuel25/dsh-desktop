@@ -38,9 +38,32 @@ function App(): React.JSX.Element {
     if (!window.dshDesktop) return
     const desktop = window.dshDesktop
     void desktop.getLocale().then((value) => setLocale(value))
-    const stopStatus = desktop.onStatus(setStatus)
-    const stopGuidance = desktop.onGuidance(setGuidance)
+
+    let hasReceivedStatus = false
+    let hasReceivedGuidance = false
+
+    const stopStatus = desktop.onStatus((message) => {
+      hasReceivedStatus = true
+      setStatus(message)
+    })
+    const stopGuidance = desktop.onGuidance((nextGuidance) => {
+      hasReceivedGuidance = true
+      setGuidance(nextGuidance)
+    })
     const stopLocale = desktop.onLocaleChanged(setLocale)
+
+    if (desktop.getStartupState) {
+      void desktop.getStartupState().then((state) => {
+        if (!state) return
+        if (!hasReceivedStatus && state.status !== null) {
+          setStatus(state.status)
+        }
+        if (!hasReceivedGuidance && state.guidance !== null) {
+          setGuidance(state.guidance)
+        }
+      })
+    }
+
     return () => {
       stopStatus()
       stopGuidance()

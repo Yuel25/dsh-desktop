@@ -12,6 +12,7 @@ const titlebarText = {
 
 function applyFrameColor(color: FrameColor): void {
   document.getElementById(TITLEBAR_ID)?.setAttribute('data-color', color)
+  if (isLocalRenderer) document.documentElement.dataset.frameColor = color
 }
 
 async function mountTitlebar(): Promise<void> {
@@ -210,6 +211,10 @@ const isLocalRenderer =
       normalizedPath.endsWith('/settings.html')))
 
 if (isLocalRenderer) {
+  // Apply the saved appearance before the local page's first render.
+  window.addEventListener('DOMContentLoaded', () => {
+    applyFrameColor(new URLSearchParams(location.search).get('frameColor') === 'white' ? 'white' : 'black')
+  })
   contextBridge.exposeInMainWorld('dshDesktop', {
     onStatus: (listener: (message: string) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, message: string): void => listener(message)
@@ -233,9 +238,15 @@ if (isLocalRenderer) {
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:open-external', url),
     openLogsFolder: (): Promise<void> => ipcRenderer.invoke('app:open-logs-folder'),
     retryStartup: (): Promise<void> => ipcRenderer.invoke('startup:retry'),
+    getStartupState: (): Promise<{
+      status: string | null
+      guidance: { mode: string; message: string } | null
+      version: number
+    }> => ipcRenderer.invoke('startup:get-state'),
     getSettings: () => ipcRenderer.invoke('settings:get'),
     setSettings: (patch: Record<string, unknown>) => ipcRenderer.invoke('settings:set', patch),
     openProfileWindow: (profile: string): Promise<void> => ipcRenderer.invoke('profile:open-window', profile),
+    listLogs: (): Promise<string[]> => ipcRenderer.invoke('logs:list'),
     readLog: (name: string): Promise<string> => ipcRenderer.invoke('logs:read', name),
     collectDiagnostics: (): Promise<string> => ipcRenderer.invoke('diag:collect'),
     checkUpdate: (): Promise<{

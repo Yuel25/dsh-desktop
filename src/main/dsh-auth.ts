@@ -40,5 +40,55 @@ export function createDshLaunchReader(port: number, onUrl: (url: string) => void
 }
 
 export function redactDshToken(message: string): string {
-  return message.replace(/([?&]token=)[^\s&#"'<>]+/gi, '$1[redacted]')
+  return message.replace(/([?&]token=)[^\s&#"'<>\x00-\x1f\x7f]+/gi, '$1[redacted]')
+}
+
+const TOKEN_PREFIX_RE = /[?&]token=/i
+const TOKEN_PARTIAL_RE = /[?&](?:t(?:o(?:k(?:e(?:n)?)?)?)?)?$/i
+const TOKEN_END_RE = /[\s&#"'<>\x00-\x1f\x7f]/
+
+export class DshLogRedactor {
+  private decoder = new StringDecoder('utf8')
+  private pending = ''
+  private redacting = false
+
+  private consume(text: string): string {
+    let input = this.pending + text
+    this.pending = ''
+    let output = ''
+    while (input.length > 0) {
+      if (this.redacting) {
+        const end = input.search(TOKEN_END_RE)
+        if (end < 0) return output
+        input = input.slice(end)
+        this.redacting = false
+      }
+      const prefix = TOKEN_PREFIX_RE.exec(input)
+      if (prefix) {
+        output += input.slice(0, prefix.index) + prefix[0] + '[redacted]'
+        input = input.slice(prefix.index + prefix[0].length)
+        this.redacting = true
+      } else {
+        // Retain only a possible incomplete marker, never the token itself.
+        const partial = TOKEN_PARTIAL_RE.exec(input)
+        const length = partial?.index ?? input.length
+        output += input.slice(0, length)
+        this.pending = input.slice(length)
+        break
+      }
+    }
+    return output
+  }
+
+  write(chunk: Buffer | string): string {
+    return this.consume(typeof chunk === 'string' ? chunk : this.decoder.write(chunk))
+  }
+
+  end(chunk?: Buffer | string): string {
+    let output = chunk === undefined ? '' : this.write(chunk)
+    output += this.consume(this.decoder.end()) + this.pending
+    this.pending = ''
+    this.redacting = false
+    return output
+  }
 }

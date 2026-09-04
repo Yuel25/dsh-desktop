@@ -1,12 +1,33 @@
 import { app, BrowserWindow } from 'electron'
 import { join } from 'node:path'
 import { t } from './i18n.js'
+import { getSettings } from './config.js'
 import { attachRendererGuards } from './security.js'
-import type { Guidance } from './types.js'
+import type { Guidance, WindowLaunchState } from './types.js'
 
 let mainWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
 let isQuitting = false
+const windowLaunchStates = new Map<number, WindowLaunchState>()
+
+function getOrCreateLaunchState(window: BrowserWindow): WindowLaunchState {
+  let state = windowLaunchStates.get(window.id)
+  if (!state) {
+    state = { status: null, guidance: null, version: 0 }
+    windowLaunchStates.set(window.id, state)
+  }
+  return state
+}
+
+export function getWindowLaunchState(window: BrowserWindow): WindowLaunchState {
+  const state = windowLaunchStates.get(window.id)
+  if (!state) return { status: null, guidance: null, version: 0 }
+  return { status: state.status, guidance: state.guidance, version: state.version }
+}
+
+export function clearWindowLaunchState(window: BrowserWindow): void {
+  windowLaunchStates.delete(window.id)
+}
 
 export function setWindowsQuitting(quitting: boolean): void {
   isQuitting = quitting
@@ -26,10 +47,13 @@ export function appIconPath(): string {
 
 export function loadLocalPage(window: BrowserWindow | null, page: string): Promise<void> {
   if (!window || window.isDestroyed()) return Promise.resolve()
+  const frameColor = getSettings().frameColor
+  const query = { frameColor }
+  window.setBackgroundColor(page === 'settings.html' || frameColor === 'white' ? '#f7f8fb' : '#07101f')
   if (process.env.ELECTRON_RENDERER_URL) {
-    return window.loadURL(`${process.env.ELECTRON_RENDERER_URL}/${page}`)
+    return window.loadURL(`${process.env.ELECTRON_RENDERER_URL}/${page}?${new URLSearchParams(query)}`)
   }
-  return window.loadFile(join(__dirname, '../renderer', page))
+  return window.loadFile(join(__dirname, '../renderer', page), { query })
 }
 
 export function createAppWindow(options: {
@@ -51,7 +75,7 @@ export function createAppWindow(options: {
     autoHideMenuBar: true,
     title: options.title,
     icon: appIconPath(),
-    backgroundColor: '#0b1220',
+    backgroundColor: getSettings().frameColor === 'white' ? '#f7f8fb' : '#07101f',
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
@@ -69,6 +93,9 @@ export function createAppWindow(options: {
       }
     })
   }
+  window.on('closed', () => {
+    windowLaunchStates.delete(window.id)
+  })
   return window
 }
 
@@ -112,18 +139,36 @@ export function openSettingsWindow(): BrowserWindow {
 
 export function sendStatus(message: string): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    const state = getOrCreateLaunchState(mainWindow)
+    state.status = message
+    state.version += 1
     mainWindow.webContents.send('dsh:status', message)
   }
 }
 
 export function sendStatusTo(window: BrowserWindow, message: string): void {
   if (!window.isDestroyed()) {
+    const state = getOrCreateLaunchState(window)
+    state.status = message
+    state.version += 1
     window.webContents.send('dsh:status', message)
   }
 }
 
 export function sendGuidance(guidance: Guidance): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    const state = getOrCreateLaunchState(mainWindow)
+    state.guidance = guidance
+    state.version += 1
     mainWindow.webContents.send('dsh:guidance', guidance)
+  }
+}
+
+export function sendGuidanceTo(window: BrowserWindow, guidance: Guidance): void {
+  if (!window.isDestroyed()) {
+    const state = getOrCreateLaunchState(window)
+    state.guidance = guidance
+    state.version += 1
+    window.webContents.send('dsh:guidance', guidance)
   }
 }

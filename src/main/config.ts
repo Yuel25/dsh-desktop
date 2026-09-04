@@ -6,6 +6,7 @@ import { getSystemLocale } from './i18n.js'
 import {
   DEFAULT_DSH_PORT,
   DEFAULT_PROFILE,
+  isValidProfileName,
   type AppSettings,
   type FrameColor,
   type LanguageSetting,
@@ -43,10 +44,10 @@ export function loadSettings(): AppSettings {
   if (!fromFile) {
     if (legacySetting<FrameColor>('appearance.json', 'frameColor') === 'white') loaded.frameColor = 'white'
     const profile = legacySetting<string>('profile.json', 'profile')
-    if (profile) loaded.profile = profile
+    if (isValidProfileName(profile)) loaded.profile = profile
   }
   if (loaded.frameColor !== 'black' && loaded.frameColor !== 'white') loaded.frameColor = 'black'
-  if (!loaded.profile) loaded.profile = DEFAULT_PROFILE
+  if (!isValidProfileName(loaded.profile)) loaded.profile = DEFAULT_PROFILE
   if (!Number.isInteger(loaded.port) || loaded.port < 1 || loaded.port > 65535) loaded.port = DEFAULT_DSH_PORT
   if (typeof loaded.startHidden !== 'boolean') loaded.startHidden = false
   if (loaded.language !== 'zh' && loaded.language !== 'en' && loaded.language !== 'system') loaded.language = 'system'
@@ -98,7 +99,7 @@ export function listProfiles(): string[] {
   try {
     const root = profilesDirectory()
     return readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, 'cordis.yml')))
+      .filter((entry) => entry.isDirectory() && isValidProfileName(entry.name) && existsSync(join(root, entry.name, 'cordis.yml')))
       .map((entry) => entry.name)
       .sort((a, b) => a.localeCompare(b))
   } catch {

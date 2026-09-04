@@ -22,7 +22,7 @@
 - 使用 Electron 窗口承载 DeepSeek Harness Web UI
 - 自定义无边框标题栏、系统托盘和单实例运行（标题栏显示当前 profile），托盘菜单保持精简
 - 可从系统托盘安全重启桌面应用及其启动的 DSH 服务
-- 可在设置中选择黑色或白色标题栏，并自动保存选择
+- 可在设置中选择黑色或白色标题栏，并自动保存选择；启动页、加载动画和错误提示同步跟随该预设
 - 可在设置中切换 DSH profile（扫描 `~/.dsh/profiles`），切换时仅重启 DSH 服务
 - 可为任意 profile 打开独立窗口，多个 profile 并行运行（各自使用独立端口）
 - 内置设置窗口：外观与语言、开机自启（可隐藏到托盘）、DSH 端口、profile 管理
@@ -98,13 +98,18 @@ pnpm install
 pnpm run dev
 ```
 
+> [!NOTE]
+> `pnpm run dev` 与 `pnpm run preview` 会在启动前自动调用 `scripts/prepare-runtime.mjs` 检查并准备 Electron 运行时。如处于网络受限环境，可配置 `ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"`。亦可单独执行 `pnpm run prepare:runtime` 预先完成准备。
+
 常用命令：
 
 ```powershell
-pnpm run typecheck  # TypeScript 检查
-pnpm run build      # 生产构建
-pnpm run check      # 类型检查 + 生产构建
-pnpm run dist       # 生成 Windows NSIS 安装包
+pnpm run prepare:runtime # 校验并准备 Electron 运行时
+pnpm run typecheck       # TypeScript 检查
+pnpm run test            # 运行自动化单元与生命周期测试
+pnpm run build           # 生产构建
+pnpm run check           # 类型检查 + 自动化测试 + 生产构建
+pnpm run dist            # 生成 Windows NSIS 安装包
 ```
 
 构建产物位于 `release/`，该目录不会提交到 Git。

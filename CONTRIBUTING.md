@@ -21,7 +21,8 @@ Install and run:
 
 ```powershell
 pnpm install
-pnpm run dev
+pnpm run prepare:runtime  # Verify or download Electron binary if needed
+pnpm run dev              # Starts development server (also runs prepare:runtime automatically)
 ```
 
 ## Pull requests

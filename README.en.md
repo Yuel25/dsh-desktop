@@ -22,7 +22,7 @@
 - Hosts the DeepSeek Harness Web UI in an Electron window
 - Provides a custom frameless title bar, system tray, and single-instance behavior (the title bar shows the active profile), with a minimal tray menu
 - Safely restarts the desktop app and its owned DSH service from the system tray
-- Offers a persistent black or white title bar selectable in settings
+- Offers a persistent black or white title bar selectable in settings; startup screens, loading indicators, and error guidance follow the same preset
 - Switches DSH profiles in settings (scans `~/.dsh/profiles`), restarting only the DSH service
 - Opens any profile in its own window so several profiles can run in parallel on separate ports
 - Built-in settings window: appearance and language, launch-at-login (optionally hidden), DSH port, and profile management
@@ -94,13 +94,18 @@ pnpm install
 pnpm run dev
 ```
 
+> [!NOTE]
+> `pnpm run dev` and `pnpm run preview` automatically invoke `scripts/prepare-runtime.mjs` to ensure the Electron runtime binary is available. In restricted network environments, set `ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"`. You can also run `pnpm run prepare:runtime` manually to verify or pre-download the binary.
+
 Available checks and builds:
 
 ```powershell
-pnpm run typecheck
-pnpm run build
-pnpm run check
-pnpm run dist
+pnpm run prepare:runtime # Verify and prepare Electron binary
+pnpm run typecheck       # TypeScript checks
+pnpm run test            # Unit and lifecycle tests
+pnpm run build           # Production build
+pnpm run check           # Typecheck + tests + build
+pnpm run dist            # Windows NSIS installer packaging
 ```
 
 Installer artifacts are written to `release/` and are not committed.

@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "private": true,
   "description": "dsh-desktop — DeepSeek Harness Desktop Client",
   "keywords": [
@@ -23,12 +23,13 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/prepare-runtime.mjs && electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "node --test test/security.test.mjs test/logging.test.mjs test/lifecycle.test.mjs test/config.test.mjs test/dsh-auth.test.mjs",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
-    "preview": "electron-vite preview",
+    "preview": "node scripts/prepare-runtime.mjs && electron-vite preview",
+    "prepare:runtime": "node scripts/prepare-runtime.mjs",
     "dist": "pnpm run build && electron-builder --win nsis"
   },
   "dependencies": {

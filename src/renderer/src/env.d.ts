@@ -22,6 +22,12 @@ type DshUpdateResult = {
   error: string | null
 }
 
+type WindowLaunchState = {
+  status: string | null
+  guidance: DshGuidance
+  version: number
+}
+
 interface Window {
   // Only exposed on dsh-desktop's own local pages (loading screen and
   // settings); the hosted DSH web UI does not get this bridge.
@@ -35,9 +41,11 @@ interface Window {
     openExternal(url: string): Promise<void>
     openLogsFolder(): Promise<void>
     retryStartup(): Promise<void>
+    getStartupState?(): Promise<WindowLaunchState>
     getSettings(): Promise<DshSettings>
     setSettings(patch: Partial<Pick<DshSettings, 'frameColor' | 'profile' | 'port' | 'startHidden'>>): Promise<DshSettings>
     openProfileWindow(profile: string): Promise<void>
+    listLogs?(): Promise<string[]>
     readLog(name: string): Promise<string>
     collectDiagnostics(): Promise<string>
     checkUpdate(): Promise<DshUpdateResult>

@@ -14,6 +14,7 @@ import {
 import { appendFile, stat } from 'node:fs/promises'
 import { Writable } from 'node:stream'
 import { basename, join } from 'node:path'
+import { DshLogRedactor, redactDshToken } from './dsh-auth.js'
 
 export const MAX_LOG_SIZE = 5 * 1024 * 1024 // 5 MiB
 export const MAX_ROTATED_FILES = 3
@@ -134,6 +135,7 @@ export function rotateLogFile(filePath: string): boolean {
 
 export function createRotatingLogStream(filename: string): Writable {
   const filePath = join(logDirectory(), filename)
+  const redactor = new DshLogRedactor()
   // Writable serializes writes and provides backpressure. No file handle remains
   // open between appends, so rotation is safe on Windows as well.
   async function append(chunk: Buffer): Promise<void> {
@@ -154,8 +156,21 @@ export function createRotatingLogStream(filename: string): Writable {
     }
   }
   return new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      void append(chunk).then(() => callback(), (error: Error) => callback(error))
+    write(chunk: Buffer | string, _encoding, callback) {
+      const redacted = redactor.write(chunk)
+      if (redacted.length === 0) {
+        callback()
+        return
+      }
+      void append(Buffer.from(redacted, 'utf8')).then(() => callback(), (error: Error) => callback(error))
+    },
+    final(callback) {
+      const remaining = redactor.end()
+      if (remaining.length === 0) {
+        callback()
+        return
+      }
+      void append(Buffer.from(remaining, 'utf8')).then(() => callback(), (error: Error) => callback(error))
     },
   })
 }
@@ -165,14 +180,32 @@ export function writeRecoveryLog(message: string): void {
     const filePath = join(logDirectory(), 'recovery.log')
     rotateLogFile(filePath)
     const timestamp = new Date().toISOString()
-    writeFileSync(filePath, `[${timestamp}] ${message}\n`, { flag: 'a' })
+    const redacted = redactDshToken(message)
+    writeFileSync(filePath, `[${timestamp}] ${redacted}\n`, { flag: 'a' })
   } catch {
     // ignore
   }
 }
 
+const DOS_DEVICE_NAME_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
+
+export function isAllowedLogFilename(name: string): boolean {
+  if (typeof name !== 'string' || name.length === 0 || name.length > 255) return false
+  if (name.includes('/') || name.includes('\\') || name.includes('\0') || name.includes('..')) return false
+  if (!name.endsWith('.log')) return false
+  if (/[<>:"/\\|?*\x00-\x1f]/.test(name)) return false
+  if (DOS_DEVICE_NAME_RE.test(name)) return false
+  return true
+}
+
 export function readLogTail(name: string, maxBytes = 128 * 1024): string {
+  if (!isAllowedLogFilename(name)) {
+    throw new Error('Unknown log file.')
+  }
   const filePath = join(logDirectory(), name)
+  if (!existsSync(filePath)) {
+    return ''
+  }
   try {
     const stats = statSync(filePath)
     const size = stats.size
@@ -185,8 +218,10 @@ export function readLogTail(name: string, maxBytes = 128 * 1024): string {
       closeSync(descriptor)
     }
     return buffer.toString('utf8')
-  } catch {
-    return ''
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return ''
+    throw error
   }
 }
 
@@ -194,10 +229,11 @@ export function listAvailableLogFiles(): string[] {
   try {
     const dir = logDirectory()
     return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.log'))
+      .filter((entry) => entry.isFile() && isAllowedLogFilename(entry.name))
       .map((entry) => entry.name)
       .sort((a, b) => a.localeCompare(b))
-  } catch {
-    return ['dsh.stdout.log', 'dsh.stderr.log', 'recovery.log']
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
   }
 }

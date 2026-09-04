@@ -41,6 +41,9 @@ const ui = {
     refresh: '刷新',
     openLogsFolder: '打开日志文件夹',
     emptyLog: '（暂无内容）',
+    emptyLogs: '暂无可用日志文件',
+    logReadFailed: '日志读取失败，请重试。',
+    retry: '重试',
     diagnostics: '诊断',
     copy: '复制诊断信息',
     copied: '已复制',
@@ -92,6 +95,9 @@ const ui = {
     refresh: 'Refresh',
     openLogsFolder: 'Open logs folder',
     emptyLog: '(empty)',
+    emptyLogs: 'No log files available',
+    logReadFailed: 'Failed to read log file; please retry.',
+    retry: 'Retry',
     diagnostics: 'Diagnostics',
     copy: 'Copy diagnostics',
     copied: 'Copied',
@@ -132,7 +138,11 @@ function App(): React.JSX.Element {
   const [portDraft, setPortDraft] = useState('')
   const isPortDirty = useRef(false)
   const [logName, setLogName] = useState('dsh.stdout.log')
+  const [logFiles, setLogFiles] = useState<string[]>([])
   const [logText, setLogText] = useState('')
+  const [logError, setLogError] = useState('')
+  const [logLoading, setLogLoading] = useState(false)
+  const activeLogRequestId = useRef(0)
   const [diagnostics, setDiagnostics] = useState('')
   const [copied, setCopied] = useState(false)
   const [updateState, setUpdateState] = useState<'idle' | 'checking' | 'done'>('idle')
@@ -158,32 +168,73 @@ function App(): React.JSX.Element {
     return desktop.onLocaleChanged(() => void refresh())
   }, [refresh, desktop])
 
-  const logFiles = useMemo(() => {
-    if (!settings) return ['dsh.stdout.log', 'dsh.stderr.log', 'recovery.log']
-    return [
-      'dsh.stdout.log',
-      'dsh.stderr.log',
-      'recovery.log',
-      ...settings.profiles.flatMap((profile) => [`dsh.${profile}.stdout.log`, `dsh.${profile}.stderr.log`]),
-    ]
-  }, [settings])
-
-  const readLog = useCallback(
-    async (name: string): Promise<void> => {
+  const loadLogs = useCallback(
+    async (targetName?: string): Promise<void> => {
       if (!desktop) return
+      const reqId = ++activeLogRequestId.current
+      setLogLoading(true)
+      setLogError('')
       try {
-        setLogText(await desktop.readLog(name))
+        const files = desktop.listLogs ? await desktop.listLogs() : []
+        if (reqId !== activeLogRequestId.current) return
+        setLogFiles(files)
+
+        const selected = targetName ?? (files.includes(logName) ? logName : (files[0] ?? ''))
+        if (selected !== logName) {
+          setLogName(selected)
+        }
+
+        if (selected) {
+          const content = await desktop.readLog(selected)
+          if (reqId !== activeLogRequestId.current) return
+          setLogText(content)
+        } else {
+          setLogText('')
+        }
       } catch {
+        if (reqId !== activeLogRequestId.current) return
+        setLogError(text.logReadFailed)
         setLogText('')
-        setError(text.failed)
+      } finally {
+        if (reqId === activeLogRequestId.current) {
+          setLogLoading(false)
+        }
       }
     },
-    [desktop, text.failed],
+    [desktop, logName, text.logReadFailed],
   )
 
   useEffect(() => {
-    void readLog(logName)
-  }, [readLog, logName])
+    if (panel === 'logs') {
+      void loadLogs()
+    }
+  }, [panel, loadLogs])
+
+  const handleLogSelect = async (selected: string): Promise<void> => {
+    setLogName(selected)
+    if (!desktop || !selected) {
+      setLogText('')
+      return
+    }
+    const reqId = ++activeLogRequestId.current
+    setLogLoading(true)
+    setLogError('')
+    try {
+      const content = await desktop.readLog(selected)
+      if (reqId === activeLogRequestId.current) {
+        setLogText(content)
+      }
+    } catch {
+      if (reqId === activeLogRequestId.current) {
+        setLogError(text.logReadFailed)
+        setLogText('')
+      }
+    } finally {
+      if (reqId === activeLogRequestId.current) {
+        setLogLoading(false)
+      }
+    }
+  }
 
   if (!desktop) {
     return <main className="loading-state"><p role="alert">{text.loadFailed}</p></main>
@@ -383,15 +434,32 @@ function App(): React.JSX.Element {
 
       <section hidden={panel !== 'logs'}>
         <h2>{text.logs}</h2>
+        {logError && (
+          <div className="feedback error" role="alert" style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>{logError}</span>
+            <button className="btn" onClick={() => void loadLogs()}>
+              {text.retry}
+            </button>
+          </div>
+        )}
         <div className="row">
-          <select aria-label={text.logs} value={logName} onChange={(event) => setLogName(event.target.value)}>
-            {logFiles.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
+          <select
+            aria-label={text.logs}
+            value={logName}
+            disabled={logLoading || logFiles.length === 0}
+            onChange={(event) => void handleLogSelect(event.target.value)}
+          >
+            {logFiles.length === 0 ? (
+              <option value="">{text.emptyLogs}</option>
+            ) : (
+              logFiles.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))
+            )}
           </select>
-          <button className="btn" onClick={() => void readLog(logName)}>
+          <button className="btn" disabled={logLoading} onClick={() => void loadLogs(logName)}>
             {text.refresh}
           </button>
           <button
@@ -400,14 +468,14 @@ function App(): React.JSX.Element {
               try {
                 await desktop.openLogsFolder()
               } catch {
-                setError(text.failed)
+                setLogError(text.failed)
               }
             }}
           >
             {text.openLogsFolder}
           </button>
         </div>
-        <pre className="output">{logText || text.emptyLog}</pre>
+        <pre className="output">{logText || (logLoading ? '…' : (logFiles.length === 0 ? text.emptyLogs : text.emptyLog))}</pre>
       </section>
 
       <section hidden={panel !== 'diagnostics'}>

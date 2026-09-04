@@ -1,3 +1,27 @@
+# dsh-desktop v1.2.4
+
+## 中文
+
+- 启动页、加载动画和错误提示跟随已保存的黑色／白色外观预设。
+- 校验 Profile 名称和配置类型，修复 Windows CMD 回退启动中含空格路径及参数的处理。
+- 对新写入日志的启动认证 token 进行流式脱敏，覆盖跨数据块和超长内容；历史日志不自动改写。
+- 修复连续崩溃的恢复次数限制，以及恢复启动失败后未继续重试的问题；稳定运行 30 秒后重置计数。
+- 页面重新加载后恢复启动提示和安装引导，避免错误页变成持续加载状态。
+- 日志按需读取，区分空日志与权限错误，并防止旧请求覆盖当前内容。
+- 补充开发环境 Electron 运行时准备步骤。
+- 验证：类型检查、49 项自动化测试和生产构建通过，包含 Windows CMD 实际参数传递测试。
+
+## English
+
+- Match startup screens, loading indicators, and error guidance to the saved black/white appearance preset.
+- Validate profile names and configuration types; fix Windows CMD fallback launches with spaces in paths and arguments.
+- Redact launch authentication tokens from newly written logs, including split and oversized values. Existing logs are not rewritten.
+- Bound repeated crash recovery, retry failed recovery launches, and reset the counter after 30 seconds of stable operation.
+- Restore startup status and installation guidance after page reloads.
+- Load logs on demand, distinguish empty logs from permission errors, and prevent stale responses from replacing current content.
+- Prepare the Electron runtime before development and preview launches.
+- Validated with type checks, 49 automated tests, and a production build, including real Windows CMD argument handling.
+
 # dsh-desktop v1.2.3
 
 ## 中文

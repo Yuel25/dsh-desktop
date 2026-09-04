@@ -45,6 +45,10 @@ export const messages = {
     en: 'DSH on port {0} requires browser authentication. Stop the externally started DSH, then retry so the desktop client can start and authenticate it.',
   },
   errorExternalHttp: { zh: '仅允许打开 http/https 链接。', en: 'Only http/https URLs can be opened.' },
+  errorInvalidProfile: {
+    zh: 'Profile 名称「{0}」不合法。名称不能包含特殊字符、换行或命令分隔符。',
+    en: 'Invalid profile name "{0}". Names cannot contain special characters, newlines, or command separators.',
+  },
   dialogProfileMismatchTitle: { zh: 'profile 不一致', en: 'Profile mismatch' },
   dialogProfileMismatchMessage: {
     zh: '端口 {0} 上已运行的 DSH 使用 profile「{1}」，与当前选择的「{2}」不一致。',
